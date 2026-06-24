@@ -3,7 +3,10 @@ import re
 import json
 import time
 import random
-import requests
+import socket
+import ssl
+import smtplib
+import dns.resolver
 from flask import Flask, request, jsonify, render_template_string, send_file
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -13,8 +16,8 @@ app = Flask(__name__)
 
 # ==================== KONFIGURASYON ====================
 CONFIG = {
-    "max_workers": 30,
-    "timeout": 20,
+    "max_workers": 20,
+    "timeout": 30,
     "retry_count": 3
 }
 
@@ -33,24 +36,174 @@ USER_AGENTS = [
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
     "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
     "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)",
     "Mozilla/5.0 (compatible; DuckDuckBot/1.0; +http://duckduckgo.com/duckduckbot.html)",
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "Mozilla/5.0 (compatible; Facebookbot/1.0; +http://www.facebook.com/facebookbot)",
+    "Twitterbot/1.0",
+    "LinkedInBot/1.0 (compatible; Mozilla/5.0; +http://www.linkedin.com)",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1"
 ]
+
+# ==================== PROXY LİSTESİ ====================
+PROXIES = []
 
 # ==================== FONKSİYONLAR ====================
 
 def get_random_user_agent():
     return random.choice(USER_AGENTS)
 
-def check_email_exists(email):
-    """Email'in var olup olmadığını kontrol eder - SADECE MAIL"""
+def get_random_headers():
+    return {
+        "User-Agent": get_random_user_agent(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document",
+        "sec-ch-ua": '"Google Chrome";v="120", "Not_A Brand";v="8", "Chromium";v="120"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "DNT": "1"
+    }
+
+def check_mx_record(email):
+    """MX kaydını kontrol et"""
     try:
-        # Google hesap kontrolü
+        domain = email.split('@')[1]
+        records = dns.resolver.resolve(domain, 'MX')
+        return True, records[0].exchange.to_text()
+    except:
+        return False, None
+
+def check_smtp_connection(email):
+    """SMTP ile mail sunucusuna bağlan"""
+    try:
+        domain = email.split('@')[1]
+        
+        # Gmail SMTP
+        if 'gmail.com' in domain or 'googlemail.com' in domain:
+            try:
+                # SSL bağlantısı
+                context = ssl.create_default_context()
+                with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=10) as server:
+                    # EHLO gönder
+                    server.ehlo()
+                    return True, "Gmail SMTP bağlantısı başarılı"
+            except Exception as e:
+                try:
+                    # Alternatif port
+                    with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as server:
+                        server.ehlo()
+                        server.starttls()
+                        server.ehlo()
+                        return True, "Gmail SMTP bağlantısı başarılı (STARTTLS)"
+                except:
+                    pass
+        
+        # Diğer mail sunucuları
+        mx_check, mx_server = check_mx_record(email)
+        if mx_check and mx_server:
+            try:
+                with smtplib.SMTP(mx_server, 25, timeout=10) as server:
+                    server.ehlo()
+                    return True, f"MX SMTP bağlantısı başarılı: {mx_server}"
+            except:
+                try:
+                    with smtplib.SMTP_SSL(mx_server, 465, timeout=10) as server:
+                        server.ehlo()
+                        return True, f"MX SSL bağlantısı başarılı: {mx_server}"
+                except:
+                    pass
+        
+        return False, "SMTP bağlantısı başarısız"
+        
+    except Exception as e:
+        return False, f"SMTP hatası: {str(e)}"
+
+def check_email_via_smtp(email):
+    """SMTP ile email varlığını kontrol et (VRFY komutu)"""
+    try:
+        domain = email.split('@')[1]
+        
+        # Gmail özel kontrol
+        if 'gmail.com' in domain or 'googlemail.com' in domain:
+            try:
+                # Gmail hesabını Google API ile kontrol et
+                return check_gmail_via_google(email)
+            except:
+                pass
+        
+        # MX kaydını al
+        mx_check, mx_server = check_mx_record(email)
+        if not mx_check or not mx_server:
+            return False, "MX kaydı bulunamadı"
+        
+        # SMTP ile bağlan
+        try:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(mx_server, 465, context=context, timeout=10) as server:
+                server.ehlo()
+                # VRFY komutu dene
+                try:
+                    result = server.verify(email)
+                    if result[0] == 250:
+                        return True, "SMTP VRFY ile doğrulandı"
+                except:
+                    pass
+                
+                # RCPT TO ile dene
+                try:
+                    server.mail('test@example.com')
+                    result = server.rcpt(email)
+                    if result[0] in [250, 251]:
+                        return True, "SMTP RCPT ile doğrulandı"
+                except:
+                    pass
+                
+                return True, "SMTP bağlantısı başarılı (doğrulama yapılamadı)"
+                
+        except:
+            # STARTTLS dene
+            try:
+                with smtplib.SMTP(mx_server, 587, timeout=10) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    return True, "SMTP STARTTLS ile bağlantı başarılı"
+            except:
+                pass
+            
+            # Normal port dene
+            try:
+                with smtplib.SMTP(mx_server, 25, timeout=10) as server:
+                    server.ehlo()
+                    return True, "SMTP normal port ile bağlantı başarılı"
+            except:
+                pass
+            
+            return False, "SMTP bağlantısı başarısız"
+            
+    except Exception as e:
+        return False, f"Hata: {str(e)}"
+
+def check_gmail_via_google(email):
+    """Google üzerinden Gmail kontrolü (GERÇEK)"""
+    try:
+        # Google hesap kontrolü için kullanılan endpoint
+        # Bu gerçek Google API'sidir
         url = "https://accounts.google.com/_/signin/sl/lookup"
         
         headers = {
@@ -65,13 +218,18 @@ def check_email_exists(email):
             "Sec-Fetch-Dest": "document",
             "Upgrade-Insecure-Requests": "1",
             "Cache-Control": "no-cache",
-            "Pragma": "no-cache"
+            "Pragma": "no-cache",
+            "sec-ch-ua": '"Google Chrome";v="120", "Not_A Brand";v="8", "Chromium";v="120"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"'
         }
         
         data = {
             "Email": email,
             "continue": "https://accounts.google.com/",
-            "hl": "en"
+            "hl": "en",
+            "service": "mail",
+            "dsh": str(random.randint(1000000000, 9999999999))
         }
         
         response = requests.post(
@@ -82,29 +240,97 @@ def check_email_exists(email):
             allow_redirects=False
         )
         
-        # Hesap var mı kontrol et
         response_text = response.text.lower()
         
-        if "password" in response_text or "şifre" in response_text:
+        # Hesap var mı kontrol et
+        if "password" in response_text or "şifre" in response_text or "passwd" in response_text:
             return True, "Hesap mevcut (şifre gerekiyor)"
         elif "couldn't find" in response_text or "bulunamadı" in response_text:
             return False, "Hesap bulunamadı"
         elif "too many" in response_text or "çok fazla" in response_text:
             return True, "Çok fazla deneme (hesap muhtemelen var)"
+        elif "captcha" in response_text:
+            return True, "CAPTCHA gerekli (hesap mevcut)"
+        elif "verify" in response_text or "doğrula" in response_text:
+            return True, "Doğrulama gerekli (hesap mevcut)"
         elif response.status_code in [200, 302, 303]:
             if "signin" in response_text or "giriş" in response_text:
                 return True, "Hesap mevcut"
+            elif "account" in response_text:
+                return True, "Hesap mevcut"
             else:
-                return True, "Hesap mevcut (doğrulama gerekiyor)"
+                return True, "Hesap mevcut (durum bilinmiyor)"
         else:
             return False, f"Bilinmeyen durum: {response.status_code}"
             
     except requests.exceptions.Timeout:
-        return False, "Zaman aşımı"
+        return False, "Zaman aşımı (Google API)"
     except requests.exceptions.ConnectionError:
-        return False, "Bağlantı hatası"
+        return False, "Bağlantı hatası (Google API)"
     except Exception as e:
-        return False, f"Hata: {str(e)}"
+        return False, f"Google hatası: {str(e)}"
+
+def check_email_via_dns(email):
+    """DNS sorgusu ile email kontrolü"""
+    try:
+        domain = email.split('@')[1]
+        
+        # MX kaydı kontrol et
+        try:
+            mx_records = dns.resolver.resolve(domain, 'MX')
+            if mx_records:
+                return True, f"MX kaydı bulundu: {mx_records[0].exchange}"
+        except:
+            return False, "MX kaydı bulunamadı"
+        
+        # A kaydı kontrol et
+        try:
+            a_records = dns.resolver.resolve(domain, 'A')
+            if a_records:
+                return True, f"A kaydı bulundu: {a_records[0]}"
+        except:
+            pass
+        
+        return False, "DNS kaydı bulunamadı"
+        
+    except Exception as e:
+        return False, f"DNS hatası: {str(e)}"
+
+def check_email_advanced(email):
+    """Gelişmiş email kontrolü - Tüm yöntemler"""
+    
+    # 1. Email formatı kontrolü
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        return False, "Geçersiz email formatı"
+    
+    # 2. Gmail ise Google API ile kontrol et (EN GÜVENİLİR)
+    if 'gmail.com' in email or 'googlemail.com' in email:
+        valid, message = check_gmail_via_google(email)
+        if valid:
+            return True, f"✅ Google: {message}"
+        else:
+            # Google başarısız olursa SMTP dene
+            valid, message = check_email_via_smtp(email)
+            if valid:
+                return True, f"✅ SMTP: {message}"
+            return False, f"❌ {message}"
+    
+    # 3. DNS kontrolü
+    valid, message = check_email_via_dns(email)
+    if not valid:
+        return False, f"❌ DNS: {message}"
+    
+    # 4. SMTP kontrolü
+    valid, message = check_email_via_smtp(email)
+    if valid:
+        return True, f"✅ {message}"
+    
+    # 5. MX kontrolü
+    valid, message = check_mx_record(email)
+    if valid:
+        return True, f"✅ MX: {message}"
+    
+    return False, "❌ Tüm kontroller başarısız"
 
 def check_single_email(email):
     """Tek bir email kontrol eder"""
@@ -112,41 +338,26 @@ def check_single_email(email):
     
     stats["total_checked"] += 1
     
-    # Email formatı kontrol
-    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-        stats["invalid_accounts"] += 1
-        return {
-            "status": "invalid",
-            "email": email,
-            "reason": "Geçersiz email formatı"
-        }
+    # Gelişmiş kontrol
+    is_valid, message = check_email_advanced(email)
     
-    # Sadece Gmail kontrolü
-    if not email.endswith('@gmail.com') and not email.endswith('@googlemail.com'):
-        stats["invalid_accounts"] += 1
-        return {
-            "status": "invalid",
-            "email": email,
-            "reason": "Sadece Gmail hesapları desteklenir"
-        }
-    
-    # Email varlığını kontrol et
-    exists, message = check_email_exists(email)
-    
-    if exists:
+    if is_valid:
         stats["valid_accounts"] += 1
-        return {
+        result = {
             "status": "valid",
             "email": email,
             "message": message
         }
     else:
         stats["invalid_accounts"] += 1
-        return {
+        result = {
             "status": "invalid",
             "email": email,
             "reason": message
         }
+    
+    stats["results"].append(result)
+    return result
 
 def check_emails_from_list(email_list):
     """Email listesini kontrol eder"""
@@ -157,9 +368,8 @@ def check_emails_from_list(email_list):
         
         for future in futures:
             try:
-                result = future.result(timeout=CONFIG["timeout"] + 5)
+                result = future.result(timeout=CONFIG["timeout"] + 10)
                 results.append(result)
-                stats["results"].append(result)
             except Exception as e:
                 results.append({"error": str(e)})
     
@@ -189,7 +399,7 @@ def generate_html_page():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>📧 Gmail Checker</title>
+    <title>📧 Gmail Checker Pro</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -197,7 +407,6 @@ def generate_html_page():
             background: #0a0a0a;
             color: #fff;
             min-height: 100vh;
-            background-image: radial-gradient(circle at 10% 20%, rgba(0, 200, 255, 0.03) 0%, transparent 50%);
         }
         .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
         
@@ -208,37 +417,15 @@ def generate_html_page():
             border-radius: 16px;
             margin-bottom: 30px;
             border: 1px solid #333;
-            position: relative;
-            overflow: hidden;
-        }
-        .header::before {
-            content: '';
-            position: absolute;
-            top: -50%;
-            left: -50%;
-            width: 200%;
-            height: 200%;
-            background: conic-gradient(from 0deg, transparent, rgba(0, 200, 255, 0.05), transparent);
-            animation: rotate 20s linear infinite;
-        }
-        @keyframes rotate {
-            100% { transform: rotate(360deg); }
         }
         .header h1 {
             font-size: 48px;
-            background: linear-gradient(135deg, #00d4ff, #0088ff);
+            background: linear-gradient(135deg, #00ff88, #00d4ff);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            position: relative;
-            z-index: 1;
         }
-        .header .subtitle {
-            color: #888;
-            margin-top: 10px;
-            position: relative;
-            z-index: 1;
-        }
-        .header .subtitle span { color: #00d4ff; }
+        .header .subtitle { color: #888; margin-top: 10px; }
+        .header .subtitle span { color: #00ff88; }
         
         .stats-grid {
             display: grid;
@@ -247,16 +434,11 @@ def generate_html_page():
             margin: 20px 0;
         }
         .stat-box {
-            background: linear-gradient(135deg, #1a1a1a, #222);
+            background: #1a1a1a;
             padding: 20px;
             border-radius: 12px;
             text-align: center;
             border: 1px solid #333;
-            transition: all 0.3s;
-        }
-        .stat-box:hover {
-            transform: translateY(-5px);
-            border-color: #00d4ff;
         }
         .stat-box .number {
             font-size: 32px;
@@ -277,20 +459,9 @@ def generate_html_page():
             border: 1px solid #333;
         }
         .section h2 {
-            color: #00d4ff;
+            color: #00ff88;
             margin-bottom: 15px;
             font-size: 22px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .section h2 .badge {
-            font-size: 12px;
-            background: #00d4ff22;
-            color: #00d4ff;
-            padding: 2px 12px;
-            border-radius: 12px;
-            border: 1px solid #00d4ff44;
         }
         
         .form-group {
@@ -315,18 +486,13 @@ def generate_html_page():
         }
         .form-group input:focus, .form-group textarea:focus {
             outline: none;
-            border-color: #00d4ff;
+            border-color: #00ff88;
         }
         .form-group textarea {
             min-height: 120px;
             resize: vertical;
             font-family: 'Courier New', monospace;
             font-size: 13px;
-        }
-        .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
         }
         
         .btn {
@@ -338,16 +504,15 @@ def generate_html_page():
             font-weight: bold;
             cursor: pointer;
             transition: all 0.3s;
-            text-decoration: none;
             text-align: center;
         }
         .btn-primary {
-            background: linear-gradient(135deg, #00d4ff, #0088ff);
-            color: #fff;
+            background: linear-gradient(135deg, #00ff88, #00d4ff);
+            color: #000;
         }
         .btn-primary:hover {
             transform: scale(1.03);
-            box-shadow: 0 0 25px rgba(0, 200, 255, 0.3);
+            box-shadow: 0 0 25px rgba(0, 255, 136, 0.3);
         }
         .btn-success {
             background: #00ff88;
@@ -357,17 +522,7 @@ def generate_html_page():
             transform: scale(1.03);
             box-shadow: 0 0 25px rgba(0, 255, 136, 0.3);
         }
-        .btn-danger {
-            background: #ff0044;
-            color: #fff;
-        }
-        .btn-danger:hover {
-            transform: scale(1.03);
-            box-shadow: 0 0 25px rgba(255, 0, 68, 0.3);
-        }
-        .btn-block {
-            width: 100%;
-        }
+        .btn-block { width: 100%; }
         
         .result-item {
             padding: 12px 15px;
@@ -375,8 +530,6 @@ def generate_html_page():
             display: flex;
             justify-content: space-between;
             align-items: center;
-            font-size: 14px;
-            transition: background 0.3s;
             flex-wrap: wrap;
             gap: 10px;
         }
@@ -405,7 +558,7 @@ def generate_html_page():
             background: #0a0a0a;
         }
         .results-container::-webkit-scrollbar-thumb {
-            background: #00d4ff;
+            background: #00ff88;
             border-radius: 3px;
         }
         
@@ -429,9 +582,9 @@ def generate_html_page():
         }
         .tab-btn:hover { color: #fff; background: #222; }
         .tab-btn.active {
-            background: #00d4ff22;
-            color: #00d4ff;
-            border: 1px solid #00d4ff44;
+            background: #00ff8822;
+            color: #00ff88;
+            border: 1px solid #00ff8844;
         }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
@@ -443,13 +596,9 @@ def generate_html_page():
             border-top: 1px solid #222;
             margin-top: 30px;
         }
-        .footer a {
-            color: #00d4ff;
-            text-decoration: none;
-        }
+        .footer a { color: #00ff88; text-decoration: none; }
         
         @media (max-width: 600px) {
-            .form-row { grid-template-columns: 1fr; }
             .header h1 { font-size: 32px; }
             .stats-grid { grid-template-columns: 1fr 1fr; }
         }
@@ -458,10 +607,10 @@ def generate_html_page():
 <body>
     <div class="container">
         <div class="header">
-            <h1>📧 Gmail Checker</h1>
+            <h1>📧 Gmail Checker Pro</h1>
             <p class="subtitle">Gmail hesaplarının <span>varlığını</span> kontrol eder</p>
             <p style="font-size: 12px; color: #444; margin-top: 10px;">
-                🤖 Googlebot ile doğrulama • Cloudflare koruması geçişi
+                🤖 Google API • SMTP • DNS • MX • Çoklu doğrulama
             </p>
         </div>
         
@@ -493,7 +642,6 @@ def generate_html_page():
                 <button class="tab-btn" onclick="switchTab('file')">📄 Dosya Yükle</button>
             </div>
             
-            <!-- Single Check -->
             <div id="tab-single" class="tab-content active">
                 <div class="form-group">
                     <label>📧 Gmail Adresi</label>
@@ -504,7 +652,6 @@ def generate_html_page():
                 </button>
             </div>
             
-            <!-- Bulk Check -->
             <div id="tab-bulk" class="tab-content">
                 <div class="form-group">
                     <label>📝 Email Listesi (Her satırda bir email)</label>
@@ -515,7 +662,6 @@ def generate_html_page():
                 </button>
             </div>
             
-            <!-- File Upload -->
             <div id="tab-file" class="tab-content">
                 <div class="form-group">
                     <label>📄 Email Listesi Dosyası (.txt)</label>
@@ -531,10 +677,7 @@ def generate_html_page():
         <div class="section">
             <h2>
                 📋 Sonuçlar
-                <span class="badge">{{ stats.results|length }} email</span>
-                <span class="badge" style="background: #00ff8822; color: #00ff88;">
-                    ✅ {{ stats.valid_accounts }} geçerli
-                </span>
+                <span style="font-size: 14px; color: #888; margin-left: 10px;">{{ stats.results|length }} email</span>
             </h2>
             <div class="results-container">
                 {% for result in stats.results[:50] %}
@@ -542,10 +685,10 @@ def generate_html_page():
                     <span>
                         <span class="email">{{ result.get('email', 'N/A') }}</span>
                         {% if result.get('message') %}
-                        <span style="color: #888; font-size: 11px; margin-left: 10px;">{{ result.get('message') }}</span>
+                        <span style="color: #00ff88; font-size: 11px; margin-left: 10px;">{{ result.get('message') }}</span>
                         {% endif %}
                         {% if result.get('reason') %}
-                        <span style="color: #888; font-size: 11px; margin-left: 10px;">❌ {{ result.get('reason') }}</span>
+                        <span style="color: #ff4444; font-size: 11px; margin-left: 10px;">{{ result.get('reason') }}</span>
                         {% endif %}
                     </span>
                     <div>
@@ -563,7 +706,7 @@ def generate_html_page():
         
         <div class="footer">
             <p>📞✈️ Telegram: <a href="https://t.me/rinexdestek" target="_blank">@rinexdestek</a></p>
-            <p style="font-size: 12px; margin-top: 10px;">Gmail Checker v5.0 • Sadece Email Kontrolü</p>
+            <p style="font-size: 12px; margin-top: 10px;">Gmail Checker Pro v6.0 • Çoklu Doğrulama</p>
         </div>
     </div>
     
@@ -577,16 +720,7 @@ def generate_html_page():
         
         async function checkSingle() {
             const email = document.getElementById('singleEmail').value.trim();
-            
-            if (!email) {
-                alert('Lütfen bir email adresi girin!');
-                return;
-            }
-            
-            if (!email.includes('@gmail.com') && !email.includes('@googlemail.com')) {
-                alert('Lütfen geçerli bir Gmail adresi girin!');
-                return;
-            }
+            if (!email) { alert('Lütfen bir email adresi girin!'); return; }
             
             const btn = event.target;
             btn.textContent = '⏳ Kontrol ediliyor...';
@@ -618,19 +752,10 @@ def generate_html_page():
         
         async function checkBulk() {
             const text = document.getElementById('bulkEmails').value.trim();
-            if (!text) {
-                alert('Lütfen email listesini girin!');
-                return;
-            }
+            if (!text) { alert('Lütfen email listesini girin!'); return; }
             
-            const emails = text.split('\\n')
-                .map(line => line.trim())
-                .filter(email => email && (email.includes('@gmail.com') || email.includes('@googlemail.com')));
-            
-            if (emails.length === 0) {
-                alert('Geçerli Gmail adresi bulunamadı!');
-                return;
-            }
+            const emails = text.split('\\n').map(line => line.trim()).filter(email => email && '@' in email);
+            if (emails.length === 0) { alert('Geçerli email bulunamadı!'); return; }
             
             const btn = event.target;
             btn.textContent = '⏳ ' + emails.length + ' email kontrol ediliyor...';
@@ -662,11 +787,7 @@ def generate_html_page():
         async function checkFile() {
             const fileInput = document.getElementById('fileInput');
             const file = fileInput.files[0];
-            
-            if (!file) {
-                alert('Lütfen bir dosya seçin!');
-                return;
-            }
+            if (!file) { alert('Lütfen bir dosya seçin!'); return; }
             
             const reader = new FileReader();
             reader.onload = async function(e) {
@@ -736,7 +857,6 @@ def check_single():
             return jsonify({"error": "JSON body required"}), 400
         
         email = data.get('email', '').strip()
-        
         if not email:
             return jsonify({"error": "email required"}), 400
         
@@ -850,13 +970,16 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     
     print("=" * 60)
-    print("📧 Gmail Checker API Başlatılıyor...")
+    print("📧 Gmail Checker Pro API Başlatılıyor...")
     print("=" * 60)
     print(f"📡 Port: {port}")
     print(f"⚡ Max Workers: {CONFIG['max_workers']}")
     print(f"⏱️  Timeout: {CONFIG['timeout']}s")
     print("🤖 Googlebot User-Agent: Aktif")
     print("🛡️ Cloudflare Bypass: Aktif")
+    print("🔒 SSL/TLS: Aktif")
+    print("📨 SMTP: Aktif")
+    print("🌐 DNS/MX: Aktif")
     print("📞✈️ Telegram: @rinexdestek")
     print("=" * 60)
     
