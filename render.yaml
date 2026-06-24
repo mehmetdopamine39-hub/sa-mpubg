@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: pubg-generator-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python pubg.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: PORT
+        value: 5000
